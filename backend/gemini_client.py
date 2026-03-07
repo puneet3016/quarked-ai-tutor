@@ -5,18 +5,25 @@ from pydantic import BaseModel, Field
 from typing import List, Literal
 
 client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
-MODEL = 'gemini-3.0-flash'
+MODEL = 'gemini-2.0-flash'
 
 import base64
+import re
+
+def strip_images_from_text(text: str) -> str:
+    """Removes HTML img tags with base64 data from text so it doesn't blow up the prompt."""
+    if not text: return text
+    return re.sub(r'(?:<br>)?<img src="[^"]+"[^>]*>', '[Image attached]', text)
 
 def get_tutor_response_stream(user_message: str, conversation_history: list, system_prompt: str, latest_image: str = None):
     """Stream a tutoring response for real-time display."""
     contents = []
     for msg in conversation_history:
         role = 'user' if msg['role'] == 'user' else 'model'
-        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
+        clean_text = strip_images_from_text(msg['content'])
+        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=clean_text)]))
         
-    user_parts = [types.Part.from_text(text=user_message)]
+    user_parts = [types.Part.from_text(text=strip_images_from_text(user_message))]
     
     if latest_image:
         try:
