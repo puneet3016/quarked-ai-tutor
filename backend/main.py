@@ -160,6 +160,16 @@ async def login(request: AuthRequest):
 async def register(request: AuthRequest):
     return {"status": "ok", "message": "Registered"}
 
+@app.get("/api/models")
+async def list_models():
+    try:
+        from google import genai
+        client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
+        model_list = [m.name for m in client.models.list()]
+        return {"models": model_list}
+    except Exception as e:
+        return {"error": str(e)}
+
 # Serve the widget
 @app.get("/widget/widget.js")
 async def serve_widget():
