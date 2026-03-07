@@ -6,9 +6,9 @@ import json
 import os
 from dotenv import load_dotenv
 
-from .prompts import get_system_prompt
-from .gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer
-from .supabase_client import log_conversation, save_practice_result, get_practice_history, get_student_profile_by_token
+from prompts import get_system_prompt
+from gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer
+from supabase_client import log_conversation, save_practice_result, get_practice_history, get_student_profile_by_token
 
 load_dotenv()
 
