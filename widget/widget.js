@@ -256,6 +256,7 @@
             border-radius: 0.5rem;
             padding: 10px 12px;
             font-family: 'Syne', sans-serif;
+            font-size: 16px; /* Prevents iOS Safari auto-zoom */
             resize: none;
             height: 44px;
             max-height: 120px;
@@ -327,9 +328,10 @@
                 top: 0;
                 left: 0;
                 width: 100%;
-                height: 100%;
+                height: 100dvh; /* Adjusts to Safari's dynamic url bar */
                 border-radius: 0;
                 bottom: 0;
+                z-index: 100000;
             }
         }
     `;
