@@ -14,9 +14,9 @@ def get_tutor_response_stream(user_message: str, conversation_history: list, sys
     contents = []
     for msg in conversation_history:
         role = 'user' if msg['role'] == 'user' else 'model'
-        contents.append(types.Content(role=role, parts=[types.Part.from_text(msg['content'])]))
+        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
         
-    user_parts = [types.Part.from_text(user_message)]
+    user_parts = [types.Part.from_text(text=user_message)]
     
     if latest_image:
         try:
