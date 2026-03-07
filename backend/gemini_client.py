@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from typing import List, Literal
 
 client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
-MODEL = 'gemini-3-flash-preview'
+MODEL = 'gemini-3.0-flash'
 
 import base64
 import re
@@ -15,8 +15,30 @@ def strip_images_from_text(text: str) -> str:
     if not text: return text
     return re.sub(r'(?:<br>)?<img src="[^"]+"[^>]*>', '[Image attached]', text)
 
-def get_tutor_response_stream(user_message: str, conversation_history: list, system_prompt: str, latest_image: str = None):
+# CACHES dictionary to hold the references to cached contents
+CACHES = {}
+
+def create_subject_cache(subject: str, exam_board: str, level: str, system_prompt: str):
+    cache = client.caches.create(
+        model=MODEL,
+        config=types.CreateCachedContentConfig(
+            display_name=f"quarked-{subject}-{exam_board}-{level}",
+            system_instruction=system_prompt,
+            ttl="86400s",  # 24 hours — renew daily
+        )
+    )
+    return cache
+
+def get_or_create_cache(subject: str, exam_board: str, level: str, system_prompt: str):
+    key = f"{subject}-{exam_board}-{level}"
+    if key not in CACHES:
+        CACHES[key] = create_subject_cache(subject, exam_board, level, system_prompt)
+    return CACHES[key]
+
+def get_tutor_response_stream(user_message: str, conversation_history: list, system_prompt: str, subject: str, exam_board: str, level: str, latest_image: str = None):
     """Stream a tutoring response for real-time display."""
+    cache = get_or_create_cache(subject, exam_board, level, system_prompt)
+    
     contents = []
     for msg in conversation_history:
         role = 'user' if msg['role'] == 'user' else 'model'
@@ -51,7 +73,7 @@ def get_tutor_response_stream(user_message: str, conversation_history: list, sys
         model=MODEL,
         contents=contents,
         config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
+            cached_content=cache.name,
             temperature=0.3,
             max_output_tokens=2000,
         ),

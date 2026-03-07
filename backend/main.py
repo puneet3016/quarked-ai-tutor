@@ -90,7 +90,11 @@ async def chat(request: ChatRequest):
                 )
                 
             latest_image = request.messages[-1].image
-            stream = get_tutor_response_stream(current_message, history, system_prompt, latest_image)
+            stream = get_tutor_response_stream(
+                current_message, history, system_prompt, 
+                request.subject, request.exam_board, request.level, 
+                latest_image
+            )
             
             full_response = ""
             for chunk in stream:
