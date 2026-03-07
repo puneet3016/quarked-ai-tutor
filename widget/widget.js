@@ -460,13 +460,26 @@
 
     // Format utility for simple markdown replacement before KaTeX
     function formatMessageText(text) {
-        // Replace bold **text**
-        let html = text.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
-        // Replace italic *text*
-        html = html.replace(/\\*(.*?)\\*/g, '<em>$1</em>');
-        // Re-encode newlines to br
-        html = html.replace(/\\n/g, '<br/>');
-        return html;
+        if (!text) return '';
+
+        // Split text by math delimiters to protect them from regex replacements
+        // This splits by $$...$$, \[...\], \(...\), and $...$
+        const mathTokenRegex = /(\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\(.*?\\\)|(?<!\$)\$(?!\$).*?(?<!\$)\$(?!\$))/g;
+        const parts = text.split(mathTokenRegex);
+
+        for (let i = 0; i < parts.length; i++) {
+            // Even indices are normal text, odd indices are the matched math blocks
+            if (i % 2 === 0) {
+                let html = parts[i];
+                // Replace bold **text**
+                html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+                // Convert newlines to breaks
+                html = html.replace(/\n/g, '<br/>');
+                parts[i] = html;
+            }
+        }
+
+        return parts.join('');
     }
 
     // Render Messages
@@ -475,11 +488,16 @@
         chatHistory.forEach(msg => {
             const div = document.createElement('div');
             div.className = 'qk-msg ' + (msg.role === 'user' ? 'qk-msg-user' : 'qk-msg-ai');
+            // We set the innerHTML, but wait for it to be attached to DOM before KaTeX
             div.innerHTML = formatMessageText(msg.content);
             messagesEl.appendChild(div);
         });
-        triggerKaTeXRender();
-        scrollToBottom();
+
+        // Wait slightly for DOM to settle then render math
+        requestAnimationFrame(() => {
+            triggerKaTeXRender();
+            scrollToBottom();
+        });
     }
 
     function triggerKaTeXRender() {
@@ -490,7 +508,9 @@
                     { left: '$', right: '$', display: false },
                     { left: '\\\\(', right: '\\\\)', display: false },
                     { left: '\\\\[', right: '\\\\]', display: true }
-                ]
+                ],
+                throwOnError: false,
+                strict: false
             });
         }
     }
@@ -596,7 +616,11 @@
                                 // stream finished
                                 chatHistory[aiMsgIndex].content = assistantResponseText;
                                 localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
-                                triggerKaTeXRender();
+                                // Only format math once stream is fully done to prevent corrupted half-equations
+                                requestAnimationFrame(() => {
+                                    triggerKaTeXRender();
+                                    scrollToBottom();
+                                });
                             }
                         } catch (e) {
                             console.error("Parse error on stream chunk", e);
