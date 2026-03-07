@@ -26,6 +26,7 @@ app.add_middleware(
 class ChatMessage(BaseModel):
     role: str
     content: str
+    image: str | None = None
     
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
@@ -88,7 +89,8 @@ async def chat(request: ChatRequest):
                     history + [{"role": "user", "content": current_message}]
                 )
                 
-            stream = get_tutor_response_stream(current_message, history, system_prompt)
+            latest_image = request.messages[-1].image
+            stream = get_tutor_response_stream(current_message, history, system_prompt, latest_image)
             
             full_response = ""
             for chunk in stream:

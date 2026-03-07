@@ -7,13 +7,38 @@ from typing import List, Literal
 client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
 MODEL = 'gemini-3.0-flash'
 
-def get_tutor_response_stream(user_message: str, conversation_history: list, system_prompt: str):
+import base64
+
+def get_tutor_response_stream(user_message: str, conversation_history: list, system_prompt: str, latest_image: str = None):
     """Stream a tutoring response for real-time display."""
     contents = []
     for msg in conversation_history:
         role = 'user' if msg['role'] == 'user' else 'model'
-        contents.append(types.Content(role=role, parts=[types.Part(text=msg['content'])]))
-    contents.append(types.Content(role='user', parts=[types.Part(text=user_message)]))
+        contents.append(types.Content(role=role, parts=[types.Part.from_text(msg['content'])]))
+        
+    user_parts = [types.Part.from_text(user_message)]
+    
+    if latest_image:
+        try:
+            # Handle data:image/jpeg;base64,... format
+            if ',' in latest_image:
+                mime_type = latest_image.split(';')[0].split(':')[1]
+                base64_data = latest_image.split(',')[1]
+            else:
+                mime_type = 'image/jpeg' # fallback
+                base64_data = latest_image
+                
+            image_bytes = base64.b64decode(base64_data)
+            user_parts.append(
+                types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type=mime_type,
+                )
+            )
+        except Exception as e:
+            print(f"Error decoding image: {e}")
+
+    contents.append(types.Content(role='user', parts=user_parts))
 
     response = client.models.generate_content_stream(
         model=MODEL,
