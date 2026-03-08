@@ -174,6 +174,19 @@ async def list_models():
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/api/models/caching")
+async def check_caching():
+    try:
+        from google import genai
+        client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
+        cache_support = {}
+        for m in client.models.list():
+            if '3' in getattr(m, 'name', '') or 'flash' in getattr(m, 'name', ''):
+                cache_support[m.name] = 'createCachedContent' in getattr(m, 'supported_generation_methods', [])
+        return {"caching_models": cache_support}
+    except Exception as e:
+        return {"error": str(e)}
+
 # Serve the widget
 @app.get("/widget/widget.js")
 async def serve_widget():
