@@ -187,6 +187,16 @@ async def check_caching():
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/api/models/v1alpha")
+async def check_v1alpha():
+    try:
+        from google import genai
+        client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'), http_options={'api_version': 'v1alpha'})
+        model_list = [m.name for m in client.models.list()]
+        return {"v1alpha_models": model_list}
+    except Exception as e:
+        return {"error": str(e)}
+
 # Serve the widget
 @app.get("/widget/widget.js")
 async def serve_widget():
