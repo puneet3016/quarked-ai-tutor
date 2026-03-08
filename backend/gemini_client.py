@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from typing import List, Literal
 
 client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
-MODEL = 'gemini-1.5-flash-002'
+MODEL = 'gemini-1.5-flash'
 
 import base64
 import re
@@ -32,7 +32,11 @@ def create_subject_cache(subject: str, exam_board: str, level: str, system_promp
 def get_or_create_cache(subject: str, exam_board: str, level: str, system_prompt: str):
     key = f"{subject}-{exam_board}-{level}"
     if key not in CACHES:
-        CACHES[key] = create_subject_cache(subject, exam_board, level, system_prompt)
+        try:
+            CACHES[key] = create_subject_cache(subject, exam_board, level, system_prompt)
+        except Exception as e:
+            print(f"Warning: Context Caching failed or unsupported ({e}). Falling back to standard processing.")
+            CACHES[key] = None
     return CACHES[key]
 
 def get_tutor_response_stream(user_message: str, conversation_history: list, system_prompt: str, subject: str, exam_board: str, level: str, latest_image: str = None):
@@ -69,14 +73,23 @@ def get_tutor_response_stream(user_message: str, conversation_history: list, sys
 
     contents.append(types.Content(role='user', parts=user_parts))
 
-    response = client.models.generate_content_stream(
-        model=MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
+    if cache:
+        config = types.GenerateContentConfig(
             cached_content=cache.name,
             temperature=0.3,
             max_output_tokens=2000,
-        ),
+        )
+    else:
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0.3,
+            max_output_tokens=2000,
+        )
+
+    response = client.models.generate_content_stream(
+        model=MODEL,
+        contents=contents,
+        config=config,
     )
     for chunk in response:
         if chunk.text:
