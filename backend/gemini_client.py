@@ -3,6 +3,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 from typing import List, Literal
+from prompts import get_system_prompt
 
 client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
 MODEL = 'gemini-3-flash-preview'
@@ -17,6 +18,44 @@ def strip_images_from_text(text: str) -> str:
 
 # CACHES dictionary to hold the references to cached contents
 CACHES = {}
+
+VALID_COMBINATIONS = [
+    # IGCSE subjects
+    ('Mathematics', 'IGCSE', 'Core'),
+    ('Mathematics', 'IGCSE', 'Extended'),
+    ('Additional Mathematics', 'IGCSE', 'Single Level'),
+    ('Physics', 'IGCSE', 'Core'),
+    ('Physics', 'IGCSE', 'Extended'),
+    ('Chemistry', 'IGCSE', 'Core'),
+    ('Chemistry', 'IGCSE', 'Extended'),
+    ('Economics', 'IGCSE', 'Single Level'),
+    ('Computer Science', 'IGCSE', 'Single Level'),
+    ('ICT', 'IGCSE', 'Single Level'),
+    # IB subjects
+    ('Mathematics', 'IB', 'AA SL'),
+    ('Mathematics', 'IB', 'AA HL'),
+    ('Mathematics', 'IB', 'AI SL'),
+    ('Mathematics', 'IB', 'AI HL'),
+    ('Physics', 'IB', 'SL'),
+    ('Physics', 'IB', 'HL'),
+    ('Chemistry', 'IB', 'SL'),
+    ('Chemistry', 'IB', 'HL'),
+    ('Economics', 'IB', 'SL'),
+    ('Economics', 'IB', 'HL'),
+    ('Computer Science', 'IB', 'SL'),
+    ('Computer Science', 'IB', 'HL'),
+]
+
+def initialize_caches():
+    """Call this once at server startup to pre-create all caches."""
+    print("Initializing Gemini caches...")
+    for subject, board, level in VALID_COMBINATIONS:
+        try:
+            system_prompt = get_system_prompt(subject, board, level)
+            get_or_create_cache(subject, board, level, system_prompt)
+            print(f"Cache created/verified: {subject} {board} {level}")
+        except Exception as e:
+            print(f"Cache failed for {subject} {board} {level}: {e}")
 
 def create_subject_cache(subject: str, exam_board: str, level: str, system_prompt: str):
     cache = client.caches.create(

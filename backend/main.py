@@ -7,12 +7,16 @@ import os
 from dotenv import load_dotenv
 
 from prompts import get_system_prompt
-from gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer
+from gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer, initialize_caches
 from supabase_client import log_conversation, save_practice_result, get_practice_history, get_student_profile_by_token
 
 load_dotenv()
 
 app = FastAPI(title="Quarked AI Tutor Backend")
+
+@app.on_event("startup")
+async def startup():
+    initialize_caches()
 
 app.add_middleware(
     CORSMiddleware,
