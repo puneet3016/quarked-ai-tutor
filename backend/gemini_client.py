@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from typing import List, Literal
 
 client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
-MODEL = 'gemini-1.5-flash'
+MODEL = 'gemini-3.0-flash'
 
 import base64
 import re
