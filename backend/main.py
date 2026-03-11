@@ -38,6 +38,7 @@ app.add_middleware(
     allow_origins=[
         "https://app.quarked.tech",
         "https://quarked.tech",
+        "https://neon-pithivier-55f97b.netlify.app",
         "http://localhost:5173",
         "http://localhost:8000"
     ],
