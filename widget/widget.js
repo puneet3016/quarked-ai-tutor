@@ -495,24 +495,60 @@
     function formatMessageText(text) {
         if (!text) return '';
 
-        // Split text by math delimiters to protect them from regex replacements
-        // This splits by $$...$$, \[...\], \(...\), and $...$
-        const mathTokenRegex = /(\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\(.*?\\\)|(?<!\$)\$(?!\$).*?(?<!\$)\$(?!\$))/g;
-        const parts = text.split(mathTokenRegex);
+        // Render math using KaTeX directly if available
+        // Matches: $$...$$, \[...\], \(...\), $...$
+        const mathPattern = /(\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/g;
+        
+        let result = '';
+        let lastIndex = 0;
+        let match;
 
-        for (let i = 0; i < parts.length; i++) {
-            // Even indices are normal text, odd indices are the matched math blocks
-            if (i % 2 === 0) {
-                let html = parts[i];
-                // Replace bold **text**
-                html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-                // Convert newlines to breaks
-                html = html.replace(/\n/g, '<br/>');
-                parts[i] = html;
+        while ((match = mathPattern.exec(text)) !== null) {
+            // Process text before this math block
+            let before = text.slice(lastIndex, match.index);
+            before = before.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            before = before.replace(/\n/g, '<br/>');
+            result += before;
+
+            // Extract raw LaTeX (strip delimiters)
+            let mathStr = match[0];
+            let displayMode = false;
+
+            if (mathStr.startsWith('$$') && mathStr.endsWith('$$')) {
+                mathStr = mathStr.slice(2, -2);
+                displayMode = true;
+            } else if (mathStr.startsWith('\\[') && mathStr.endsWith('\\]')) {
+                mathStr = mathStr.slice(2, -2);
+                displayMode = true;
+            } else if (mathStr.startsWith('\\(') && mathStr.endsWith('\\)')) {
+                mathStr = mathStr.slice(2, -2);
+            } else if (mathStr.startsWith('$') && mathStr.endsWith('$')) {
+                mathStr = mathStr.slice(1, -1);
             }
+
+            // Render with KaTeX if available
+            if (window.katex) {
+                try {
+                    result += window.katex.renderToString(mathStr.trim(), {
+                        displayMode: displayMode,
+                        throwOnError: false
+                    });
+                } catch (e) {
+                    result += match[0]; // fallback to raw text
+                }
+            } else {
+                result += match[0]; // KaTeX not loaded yet
+            }
+            lastIndex = match.index + match[0].length;
         }
 
-        return parts.join('');
+        // Process remaining text after last math block
+        let remaining = text.slice(lastIndex);
+        remaining = remaining.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        remaining = remaining.replace(/\n/g, '<br/>');
+        result += remaining;
+
+        return result;
     }
 
     // Render Messages
