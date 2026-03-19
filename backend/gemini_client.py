@@ -6,7 +6,7 @@ from typing import List, Literal
 from prompts import get_system_prompt
 
 client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
-MODEL = 'gemini-3.1-flash-lite'
+MODEL = 'gemini-3.1-flash-lite-preview'
 
 import base64
 import re
