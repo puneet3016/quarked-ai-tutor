@@ -354,13 +354,16 @@ async def get_progress(current_user: dict = Depends(get_current_user)):
 async def reset_admin_password(secret: str):
     if secret != "quarked-reset-2026":
         raise HTTPException(status_code=403, detail="Invalid")
-    from supabase_client import get_supabase, get_password_hash
-    sb = get_supabase()
-    new_hash = get_password_hash("quarkedadmin")
-    result = sb.table("students").update({"password_hash": new_hash}).eq("username", "admin").execute()
-    if result.data:
-        return {"message": "Admin password reset to 'quarkedadmin'"}
-    return {"message": "No admin user found"}
+    try:
+        from supabase_client import get_supabase, get_password_hash
+        sb = get_supabase()
+        new_hash = get_password_hash("quarkedadmin")
+        result = sb.table("students").update({"password_hash": new_hash}).eq("username", "admin").execute()
+        if result.data:
+            return {"message": "Admin password reset to quarkedadmin", "user": result.data[0].get("username")}
+        return {"message": "No admin user found"}
+    except Exception as e:
+        return {"error": str(e)}
 
 # Serve the widget
 @app.get("/widget/widget.js")
