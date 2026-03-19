@@ -6,7 +6,7 @@ from typing import List, Literal
 from prompts import get_system_prompt
 
 client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
-MODEL = 'gemini-3-flash-preview'
+MODEL = 'gemini-3.1-flash-lite'
 
 import base64
 import re
@@ -144,28 +144,7 @@ def get_tutor_response_stream(user_message: str, conversation_history: list, sys
                 yield chunk.text
 
     except Exception as e:
-        error_msg = str(e)
-        if "503" in error_msg or "429" in error_msg or "high demand" in error_msg.lower():
-            print(f"Model {MODEL} is busy. Falling back to gemini-2.5-flash...")
-            try:
-                # Use standard un-cached fallback for 2.5-flash
-                fallback_config = types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.3,
-                    max_output_tokens=2000,
-                )
-                response = client.models.generate_content_stream(
-                    model='gemini-2.5-flash',
-                    contents=contents,
-                    config=fallback_config,
-                )
-                for chunk in response:
-                    if chunk.text:
-                        yield chunk.text
-            except Exception as e2:
-                raise e2
-        else:
-            raise e
+        raise e
 
 # Structured output for question generation
 class GeneratedQuestion(BaseModel):
