@@ -124,6 +124,22 @@ async def get_current_admin(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Not authorized. Admin access required.")
     return current_user
 
+async def get_optional_user(request: Request):
+    """Returns user dict if valid JWT present, None otherwise. Used for public widget."""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    try:
+        token = auth_header.split(" ")[1]
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if username:
+            user = get_student_by_username(username)
+            return user
+    except Exception:
+        pass
+    return None
+
 # --- Authentication Endpoints ---
 
 @app.post("/api/auth/register")
@@ -217,7 +233,7 @@ async def admin_dashboard(admin: dict = Depends(get_current_admin)):
 # --- Chat & AI Endpoints ---
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest, current_user: dict = Depends(get_current_user)):
+async def chat(request: ChatRequest, current_user: dict | None = Depends(get_optional_user)):
     async def generate():
         try:
             # history context: format for gemini client
@@ -226,8 +242,8 @@ async def chat(request: ChatRequest, current_user: dict = Depends(get_current_us
             
             system_prompt = get_system_prompt(request.subject, request.exam_board, request.level)
             
-            # Log the question immediately
-            if request.session_id:
+            # Log the question if authenticated
+            if request.session_id and current_user:
                 log_session_action(
                     session_id=request.session_id,
                     student_uuid=current_user['uuid'],
@@ -250,8 +266,8 @@ async def chat(request: ChatRequest, current_user: dict = Depends(get_current_us
                 # Still outputting proper JSON formats within the SSE context for the frontend
                 yield f"data: {json.dumps({'text': chunk})}\n\n"
                 
-            # Log completion size
-            if request.session_id:
+            # Log completion size if authenticated
+            if request.session_id and current_user:
                 log_session_action(
                     session_id=request.session_id,
                     student_uuid=current_user['uuid'],
