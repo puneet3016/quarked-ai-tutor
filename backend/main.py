@@ -349,6 +349,19 @@ async def get_progress(current_user: dict = Depends(get_current_user)):
     history = get_practice_history(current_user['uuid'])
     return {"history": history}
 
+# TEMPORARY: one-time admin password reset - REMOVE after use
+@app.get("/api/reset-admin-pw/{secret}")
+async def reset_admin_password(secret: str):
+    if secret != "quarked-reset-2026":
+        raise HTTPException(status_code=403, detail="Invalid")
+    from supabase_client import get_supabase, get_password_hash
+    sb = get_supabase()
+    new_hash = get_password_hash("quarkedadmin")
+    result = sb.table("students").update({"password_hash": new_hash}).eq("username", "admin").execute()
+    if result.data:
+        return {"message": "Admin password reset to 'quarkedadmin'"}
+    return {"message": "No admin user found"}
+
 # Serve the widget
 @app.get("/widget/widget.js")
 async def serve_widget():
