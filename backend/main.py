@@ -355,6 +355,12 @@ async def reset_admin_password(secret: str):
     if secret != "quarked-reset-2026":
         raise HTTPException(status_code=403, detail="Invalid")
     try:
+        # Check env vars
+        supa_url = os.environ.get("SUPABASE_URL", "")
+        supa_key = os.environ.get("SUPABASE_KEY", "")
+        env_keys = [k for k in os.environ.keys() if 'supa' in k.lower()]
+        if not supa_url:
+            return {"error": "SUPABASE_URL not set", "supabase_env_vars": env_keys}
         from supabase_client import get_supabase, get_password_hash
         sb = get_supabase()
         new_hash = get_password_hash("quarkedadmin")
