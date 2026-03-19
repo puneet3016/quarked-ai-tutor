@@ -72,8 +72,9 @@
             position: absolute;
             bottom: 80px;
             right: 0;
-            width: 400px;
-            height: 600px;
+            width: 460px;
+            height: calc(100vh - 130px);
+            max-height: 850px;
             background-color: #0a0a0a;
             border: 1px solid #2a2a2a;
             border-radius: 1rem;
@@ -265,6 +266,29 @@
         
         .qk-textarea:focus { border-color: #d4a84a; }
 
+        .qk-upload-btn {
+            background-color: transparent;
+            color: #a0a0a0;
+            border: none;
+            width: 44px;
+            height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+
+        .qk-upload-btn:hover {
+            color: #f0c674;
+        }
+
+        .qk-upload-btn svg {
+            width: 24px;
+            height: 24px;
+            fill: currentColor;
+        }
+
         .qk-send-btn {
             background-color: #f0c674;
             color: #0a0a0a;
@@ -386,12 +410,20 @@
             </div>
             
             <div class="qk-input-area">
+                <input type="file" id="qk-image-upload" accept="image/*" style="display: none;" />
+                <label for="qk-image-upload" class="qk-upload-btn" title="Upload Image">
+                    <svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
+                </label>
+                <div id="qk-image-preview-container" style="display: none; position: absolute; bottom: 70px; left: 16px; background: #161616; padding: 4px; border-radius: 8px; border: 1px solid #2a2a2a;">
+                    <img id="qk-image-preview" src="" style="max-height: 80px; max-width: 100px; border-radius: 4px;" />
+                    <button id="qk-remove-image" style="position: absolute; top: -8px; right: -8px; background: #f0c674; color: #000; border: none; border-radius: 50%; width: 20px; height: 20px; cursor: pointer; font-size: 12px; line-height: 1;">&times;</button>
+                </div>
                 <textarea class="qk-textarea" id="qk-input" placeholder="Ask your tutor..." rows="1"></textarea>
                 <button class="qk-send-btn" id="qk-send-btn" disabled>
                     <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
                 </button>
             </div>
-            <div class="qk-footer">Powered by Quarked &times; Gemini</div>
+            <div class="qk-footer">Powered by Quarked</div>
         </div>
         
         <div class="qk-launcher" id="qk-launcher">
@@ -460,7 +492,6 @@
     launcher.addEventListener('click', togglePanel);
     closeBtn.addEventListener('click', togglePanel);
 
-    // Format utility for simple markdown replacement before KaTeX
     function formatMessageText(text) {
         if (!text) return '';
 
@@ -490,16 +521,11 @@
         chatHistory.forEach(msg => {
             const div = document.createElement('div');
             div.className = 'qk-msg ' + (msg.role === 'user' ? 'qk-msg-user' : 'qk-msg-ai');
-            // We set the innerHTML, but wait for it to be attached to DOM before KaTeX
             div.innerHTML = formatMessageText(msg.content);
             messagesEl.appendChild(div);
         });
-
-        // Wait slightly for DOM to settle then render math
-        requestAnimationFrame(() => {
-            triggerKaTeXRender();
-            scrollToBottom();
-        });
+        triggerKaTeXRender();
+        scrollToBottom();
     }
 
     function triggerKaTeXRender() {
@@ -508,11 +534,11 @@
                 delimiters: [
                     { left: '$$', right: '$$', display: true },
                     { left: '$', right: '$', display: false },
-                    { left: '\\\\(', right: '\\\\)', display: false },
-                    { left: '\\\\[', right: '\\\\]', display: true }
+                    { left: '\\(', right: '\\)', display: false },
+                    { left: '\\[', right: '\\]', display: true }
                 ],
-                throwOnError: false,
-                strict: false
+                strict: false,
+                throwOnError: false
             });
         }
     }
@@ -545,27 +571,80 @@
         renderMessages();
     });
 
+    // Manage image upload
+    let selectedImageBase64 = null;
+    const fileInput = document.getElementById('qk-image-upload');
+    const imagePreviewContainer = document.getElementById('qk-image-preview-container');
+    const imagePreview = document.getElementById('qk-image-preview');
+    const removeImageBtn = document.getElementById('qk-remove-image');
+
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = function (event) {
+                selectedImageBase64 = event.target.result;
+                imagePreview.src = selectedImageBase64;
+                imagePreviewContainer.style.display = 'block';
+                sendBtn.disabled = false; // allow sending just an image
+                inputEl.focus(); // Focus the textarea so Enter key works right away
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+
+    removeImageBtn.addEventListener('click', () => {
+        selectedImageBase64 = null;
+        imagePreview.src = '';
+        imagePreviewContainer.style.display = 'none';
+        fileInput.value = '';
+        if (inputEl.value.trim().length === 0) {
+            sendBtn.disabled = true;
+        }
+    });
+
     // Send Message Logic via SSE
     async function sendMessage() {
         const text = inputEl.value.trim();
-        if (!text) return;
+        if (!text && !selectedImageBase64) return;
 
-        // Reset input
+        // Reset inputs
         inputEl.value = '';
         inputEl.style.height = '44px';
         sendBtn.disabled = true;
 
+        // Prepare image data for history if exists
+        let imgData = selectedImageBase64;
+
         // Add user msg
-        chatHistory.push({ role: 'user', content: text });
+        const msgContent = imgData
+            ? text ? text + `<br><img src="${imgData}" style="max-width:100%; border-radius:8px; margin-top:8px;">` : `<img src="${imgData}" style="max-width:100%; border-radius:8px;">`
+            : text;
+
+        chatHistory.push({ role: 'user', content: msgContent });
         renderMessages();
+
+        // Clear preview right after sending UI update
+        selectedImageBase64 = null;
+        imagePreviewContainer.style.display = 'none';
+        fileInput.value = '';
 
         // Setup payload mapping to ChatRequest from FastAPI
         const payload = {
-            messages: chatHistory,
+            messages: chatHistory.map(m => {
+                // Strip out inline HTML image tags from history payload going to backend
+                let cleanContent = m.content.replace(/<br>/g, '\n').replace(/<img[^>]*>/g, '').trim();
+                return {
+                    role: m.role,
+                    content: cleanContent,
+                    // Note: we pass the raw imgData in a separate field just for the latest message 
+                    // to avoid sending massive base64 histories back and forth
+                    image: (m === chatHistory[chatHistory.length - 1] && imgData) ? imgData : undefined
+                };
+            }),
             subject: subjectSelect.value,
             exam_board: boardSelect.value,
             level: levelSelect.value
-            // student_id could be passed if authenticated
         };
 
         // Add dummy AI message for streaming
@@ -585,20 +664,38 @@
                 body: JSON.stringify(payload)
             });
 
+            // Handle rate limit for public users
+            if (response.status === 429) {
+                if (typingEl.parentNode === messagesEl) {
+                    messagesEl.removeChild(typingEl);
+                }
+                chatHistory[aiMsgIndex].content = "⚡ You've used your 5 free questions for today!\n\nSign up on our student portal for **unlimited access** to the Quarked AI Tutor:\n\n👉 [Register here](https://neon-pithivier-55f97b.netlify.app)\n\nOr WhatsApp Puneet directly: [+91 70113 03807](https://wa.me/917011303807)";
+                localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
+                renderMessages();
+                return;
+            }
+
             const reader = response.body.getReader();
             const decoder = new TextDecoder('utf-8');
             let assistantResponseText = '';
 
-            messagesEl.removeChild(typingEl);
+            // We do NOT remove typingEl here. We will remove it as soon as we get the first chunk or an error.
 
             // Create target div for streaming
             const streamingDiv = document.createElement('div');
             streamingDiv.className = 'qk-msg qk-msg-ai';
             messagesEl.appendChild(streamingDiv);
 
+            let hasRemovedTyping = false;
+
             while (true) {
                 const { done, value } = await reader.read();
-                if (done) break;
+                if (done) {
+                    if (!hasRemovedTyping && typingEl.parentNode === messagesEl) {
+                        messagesEl.removeChild(typingEl);
+                    }
+                    break;
+                }
 
                 const chunk = decoder.decode(value, { stream: true });
                 const lines = chunk.split('\\n\\n');
@@ -610,12 +707,20 @@
                             const data = JSON.parse(dataStr);
                             if (data.error) {
                                 console.error('Tutor error:', data.error);
+                                if (!hasRemovedTyping && typingEl.parentNode === messagesEl) {
+                                    messagesEl.removeChild(typingEl);
+                                    hasRemovedTyping = true;
+                                }
+                                throw new Error(data.error);
                             } else if (data.text) {
+                                if (!hasRemovedTyping && typingEl.parentNode === messagesEl) {
+                                    messagesEl.removeChild(typingEl);
+                                    hasRemovedTyping = true;
+                                }
                                 assistantResponseText += data.text;
                                 streamingDiv.innerHTML = formatMessageText(assistantResponseText);
                                 scrollToBottom();
                             } else if (data.done) {
-                                // stream finished
                                 chatHistory[aiMsgIndex].content = assistantResponseText;
                                 localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
                                 // Only format math once stream is fully done to prevent corrupted half-equations
@@ -632,8 +737,12 @@
             }
 
         } catch (err) {
-            console.error(err);
-            chatHistory[aiMsgIndex].content = "Sorry, I had trouble connecting. Please try again.";
+            console.error("Stream catch block:", err);
+            // Ensure typing animation is removed if fetch failed before starting the stream
+            if (typingEl.parentNode === messagesEl) {
+                messagesEl.removeChild(typingEl);
+            }
+            chatHistory[aiMsgIndex].content = "Sorry, I had trouble connecting to the Tutor API. Please try asking again.";
             localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
             renderMessages();
         } finally {

@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from dotenv import load_dotenv
+from collections import defaultdict
 
 from prompts import get_system_prompt
 from gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer, initialize_caches
@@ -28,6 +29,28 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 7 days
 
 app = FastAPI(title="Quarked AI Tutor Backend")
 security = HTTPBearer()
+
+# Rate limiting for public widget (unauthenticated users)
+PUBLIC_RATE_LIMIT = 5  # max questions per IP per day
+rate_limit_store = defaultdict(lambda: {"count": 0, "date": datetime.utcnow().date()})
+
+def check_rate_limit(ip: str) -> bool:
+    """Returns True if the IP is within the daily limit, False if exceeded."""
+    entry = rate_limit_store[ip]
+    today = datetime.utcnow().date()
+    if entry["date"] != today:
+        entry["count"] = 0
+        entry["date"] = today
+    return entry["count"] < PUBLIC_RATE_LIMIT
+
+def increment_rate_limit(ip: str):
+    entry = rate_limit_store[ip]
+    today = datetime.utcnow().date()
+    if entry["date"] != today:
+        entry["count"] = 1
+        entry["date"] = today
+    else:
+        entry["count"] += 1
 
 @app.on_event("startup")
 async def startup():
@@ -233,7 +256,17 @@ async def admin_dashboard(admin: dict = Depends(get_current_admin)):
 # --- Chat & AI Endpoints ---
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest, current_user: dict | None = Depends(get_optional_user)):
+async def chat(request: ChatRequest, req: Request, current_user: dict | None = Depends(get_optional_user)):
+    # Rate limit unauthenticated (public widget) users
+    if current_user is None:
+        client_ip = req.headers.get("x-forwarded-for", req.client.host).split(",")[0].strip()
+        if not check_rate_limit(client_ip):
+            raise HTTPException(
+                status_code=429,
+                detail="You've used your 5 free questions for today! Sign up at our portal for unlimited access."
+            )
+        increment_rate_limit(client_ip)
+
     async def generate():
         try:
             # history context: format for gemini client
