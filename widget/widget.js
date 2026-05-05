@@ -445,23 +445,71 @@
     const levelSelect = document.getElementById('qk-level-select');
 
     // Select dropdown dynamics
-    function updateLevelOptions() {
+    async function updateLevelDropdown() {
+        const subject = subjectSelect.value;
         const board = boardSelect.value;
         const currentLevel = initialValues.level || levelSelect.value;
-        levelSelect.innerHTML = '';
-        if (board === 'IGCSE') {
-            levelSelect.innerHTML = `<option value="Extended">Extended</option><option value="Core">Core</option>`;
-        } else if (board === 'IB') {
-            levelSelect.innerHTML = `<option value="HL">HL</option><option value="SL">SL</option>`;
-        } else {
-            levelSelect.innerHTML = `<option value="AS Level">AS Level</option><option value="A2 Level">A2 Level</option>`;
+        
+        const apiUrl = API_URL;
+        
+        try {
+            const response = await fetch(`${apiUrl}/api/subjects/${board}`);
+            const subjects = await response.json();
+            const levels = subjects[subject] || [];
+            
+            levelSelect.innerHTML = '';
+            
+            if (levels.length === 0 || (levels.length === 1 && levels[0] === 'Single Level')) {
+                levelSelect.style.display = 'none';
+                if (levels.length === 1) {
+                    const option = document.createElement('option');
+                    option.value = levels[0];
+                    option.textContent = levels[0];
+                    levelSelect.appendChild(option);
+                }
+            } else {
+                levelSelect.style.display = 'block';
+                levels.forEach(level => {
+                    const option = document.createElement('option');
+                    option.value = level;
+                    option.textContent = level;
+                    if (level === currentLevel) option.selected = true;
+                    levelSelect.appendChild(option);
+                });
+            }
+            savePreferences();
+        } catch (err) {
+            console.error('Failed to fetch levels:', err);
         }
-        // Attempt to re-select if exists
-        Array.from(levelSelect.options).forEach(opt => {
-            if (opt.value === currentLevel) opt.selected = true;
-        });
+    }
 
-        savePreferences();
+    async function updateSubjectDropdown() {
+        const board = boardSelect.value;
+        const apiUrl = API_URL;
+        
+        try {
+            const response = await fetch(`${apiUrl}/api/subjects/${board}`);
+            const subjects = await response.json();
+            
+            const currentSubject = initialValues.subject || subjectSelect.value;
+            subjectSelect.innerHTML = '';
+            
+            Object.keys(subjects).forEach(subject => {
+                const option = document.createElement('option');
+                option.value = subject;
+                option.textContent = subject;
+                if (subject === currentSubject) option.selected = true;
+                subjectSelect.appendChild(option);
+            });
+            
+            // clear initial values so future updates don't lock onto them
+            initialValues.subject = null;
+            initialValues.level = null;
+            
+            updateLevelDropdown();
+        } catch (err) {
+            console.error('Failed to fetch subjects:', err);
+        }
     }
 
     function savePreferences() {
@@ -470,10 +518,10 @@
         localStorage.setItem('qk_level', levelSelect.value);
     }
 
-    boardSelect.addEventListener('change', updateLevelOptions);
-    subjectSelect.addEventListener('change', savePreferences);
+    boardSelect.addEventListener('change', updateSubjectDropdown);
+    subjectSelect.addEventListener('change', updateLevelDropdown);
     levelSelect.addEventListener('change', savePreferences);
-    updateLevelOptions();
+    updateSubjectDropdown();
 
     // Panel Toggle
     function togglePanel() {
@@ -491,6 +539,15 @@
 
     launcher.addEventListener('click', togglePanel);
     closeBtn.addEventListener('click', togglePanel);
+
+    // Simple formatter for streaming — no KaTeX, just bold + newlines
+    function simpleFormatText(text) {
+        if (!text) return '';
+        let result = text;
+        result = result.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        result = result.replace(/\n/g, '<br/>');
+        return result;
+    }
 
     function formatMessageText(text) {
         if (!text) return '';
@@ -723,6 +780,7 @@
             messagesEl.appendChild(streamingDiv);
 
             let hasRemovedTyping = false;
+            let buffer = '';
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -733,12 +791,16 @@
                     break;
                 }
 
-                const chunk = decoder.decode(value, { stream: true });
-                const lines = chunk.split('\\n\\n');
-
-                for (const line of lines) {
+                buffer += decoder.decode(value, { stream: true });
+                let boundary;
+                
+                while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+                    let line = buffer.slice(0, boundary).trim();
+                    buffer = buffer.slice(boundary + 2);
+                    
                     if (line.startsWith('data: ')) {
                         const dataStr = line.substring(6);
+                        if (!dataStr) continue;
                         try {
                             const data = JSON.parse(dataStr);
                             if (data.error) {
@@ -754,12 +816,13 @@
                                     hasRemovedTyping = true;
                                 }
                                 assistantResponseText += data.text;
-                                streamingDiv.innerHTML = formatMessageText(assistantResponseText);
+                                streamingDiv.innerHTML = simpleFormatText(assistantResponseText);
                                 scrollToBottom();
                             } else if (data.done) {
                                 chatHistory[aiMsgIndex].content = assistantResponseText;
                                 localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
-                                // Only format math once stream is fully done to prevent corrupted half-equations
+                                // Now render with full KaTeX math support
+                                streamingDiv.innerHTML = formatMessageText(assistantResponseText);
                                 requestAnimationFrame(() => {
                                     triggerKaTeXRender();
                                     scrollToBottom();

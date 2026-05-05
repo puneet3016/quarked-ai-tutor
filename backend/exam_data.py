@@ -22,6 +22,33 @@ SUBJECTS = {
             'topics': ['Number and algebra', 'Functions', 'Geometry and trigonometry', 'Statistics and probability', 'Calculus'],
         },
     },
+    'Additional Mathematics': {
+        'IGCSE': {
+            'code': '0606',
+            'tiers': ['Single Level'],
+            'papers': {
+                'Paper 1': {'duration': '2h', 'marks': 80, 'weight': '50%', 'calculator': True},
+                'Paper 2': {'duration': '2h', 'marks': 80, 'weight': '50%', 'calculator': True},
+            },
+            'topics': [
+                'Functions (composite, inverse)',
+                'Quadratic functions (completing the square, discriminant)',
+                'Indices and surds',
+                'Factors of polynomials (factor theorem, remainder theorem)',
+                'Simultaneous equations (linear and non-linear)',
+                'Logarithmic and exponential functions',
+                'Straight line graphs (converting non-linear to linear form)',
+                'Circular measure (radians, arc length, sector area)',
+                'Trigonometry (identities, solving equations)',
+                'Permutations and combinations',
+                'Binomial theorem',
+                'Differentiation (chain rule, product rule, quotient rule)',
+                'Integration (definite, area under/between curves)',
+                'Kinematics (displacement, velocity, acceleration)',
+            ],
+        },
+        'IB': None,  # No direct IB equivalent
+    },
     'Physics': {
         'IGCSE': {
             'code': '0625/0972',
@@ -111,3 +138,52 @@ SUBJECTS = {
         }
     }
 }
+
+SUBJECT_LEVELS = {
+    'Mathematics': {
+        'IGCSE': ['Core', 'Extended'],
+        'IB': ['AA SL', 'AA HL', 'AI SL', 'AI HL'],
+    },
+    'Additional Mathematics': {
+        'IGCSE': ['Single Level'],  # No tiers — one syllabus (0606)
+        'IB': None,  # No IB equivalent — closest is AA HL
+    },
+    'Physics': {
+        'IGCSE': ['Core', 'Extended'],
+        'IB': ['SL', 'HL'],
+    },
+    'Chemistry': {
+        'IGCSE': ['Core', 'Extended'],
+        'IB': ['SL', 'HL'],
+    },
+    'Economics': {
+        'IGCSE': ['Single Level'],  # No tiers (0455)
+        'IB': ['SL', 'HL'],
+    },
+    'Computer Science': {
+        'IGCSE': ['Single Level'],  # No tiers (0478)
+        'IB': ['SL', 'HL'],
+    },
+    'ICT': {
+        'IGCSE': ['Single Level'],  # No tiers (0417)
+        'IB': None,  # No IB equivalent
+    },
+}
+
+# API endpoint to serve this to the widget
+def get_levels_for_subject(subject: str, exam_board: str) -> list:
+    """Return available levels for a subject/board combination."""
+    if subject not in SUBJECT_LEVELS:
+        return []
+    board_levels = SUBJECT_LEVELS[subject].get(exam_board)
+    if board_levels is None:
+        return []  # Subject not available for this board
+    return board_levels
+
+# Subjects available per board
+def get_subjects_for_board(exam_board: str) -> list:
+    """Return subjects available for a given exam board."""
+    return [
+        subject for subject, boards in SUBJECT_LEVELS.items()
+        if boards.get(exam_board) is not None
+    ]

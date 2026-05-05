@@ -61,6 +61,46 @@ MATHS_SPECIFIC = """
 - Common errors: sign errors, forgetting ±, incorrect rounding, not stating domain/range
 """
 
+ADDMATHS_SPECIFIC = """
+SYLLABUS: Cambridge IGCSE Additional Mathematics (0606)
+This is a SEPARATE subject from IGCSE Mathematics (0580). It is more advanced and covers:
+
+TOPICS:
+1. Functions: domain, range, composite functions f∘g, inverse functions f⁻¹
+2. Quadratic functions: completing the square, discriminant (b²-4ac), max/min problems
+3. Equations, inequalities and graphs: solving simultaneous equations (one linear, one non-linear), modulus functions
+4. Indices and surds: rules of indices, rationalising denominators
+5. Factors of polynomials: factor theorem, remainder theorem, cubic expressions
+6. Simultaneous equations: one linear one quadratic, substitution method
+7. Logarithmic and exponential functions: laws of logarithms, solving aˣ = b, natural logarithms (ln), change of base
+8. Straight line graphs: y = mx + c, converting non-linear to linear form (the BIG topic — students must master transforming y = axⁿ into ln y = n ln x + ln a)
+9. Circular measure: radians, arc length (s = rθ), sector area (A = ½r²θ)
+10. Trigonometry: identities (sin²x + cos²x = 1, tan x = sin x/cos x), solving trig equations in given ranges, amplitude and period
+11. Permutations and combinations: nPr, nCr, with restrictions
+12. Binomial theorem: expansion of (a+b)ⁿ, finding specific terms, using nCr notation
+13. Differentiation: power rule, chain rule, product rule, quotient rule, tangents and normals, stationary points (max/min/inflection), connected rates of change, small increments
+14. Integration: reverse of differentiation, definite integrals, area under curve, area between curves, kinematics (displacement/velocity/acceleration)
+15. Kinematics: v = ds/dt, a = dv/dt, s = ∫v dt — distinguish between distance and displacement
+
+EXAM STRUCTURE:
+- Paper 1: 2 hours, 80 marks, ~10-12 structured questions, calculator allowed
+- Paper 2: 2 hours, 80 marks, ~10-12 structured questions, calculator allowed
+- Both papers test the FULL syllabus
+- NO formula sheet given — students must memorize ALL formulas
+
+CRITICAL TEACHING POINTS:
+- Converting non-linear to linear form (Topic 8) appears EVERY session — drill this relentlessly
+- Differentiation and integration together account for ~30-40% of marks
+- Students often confuse Add Maths differentiation rules with basic IGCSE algebra — reinforce the chain rule early
+- Common error: forgetting +C in indefinite integration
+- Common error: wrong sign in completing the square
+- Common error: not considering all solutions in trig equations within a given range
+- For kinematics: clearly distinguish when to differentiate (finding velocity from displacement) vs integrate (finding displacement from velocity)
+- Always show full working — method marks are critical
+- Exact answers preferred unless question says "correct to 3 significant figures"
+- When question says "show that" — every algebraic step must be visible
+"""
+
 CHEMISTRY_SPECIFIC = """
 - Chemical equations MUST be balanced with state symbols: (s), (l), (g), (aq)
 - Mole calculations: clearly state mole ratio from equation
@@ -109,11 +149,16 @@ def get_system_prompt(subject: str, exam_board: str, level: str) -> str:
     subject_map = {
         'Physics': PHYSICS_SPECIFIC + "\n- A Level: Distinguish between AS (Paper 1/2) precision and A2 (Paper 4) holistic application. State formulas clearly before calculation.",
         'Mathematics': MATHS_SPECIFIC + "\n- A Level: Pure Math requires rigorous proof steps. Mechanics/Stats require clear model assumptions. Show all intermediate steps.",
+        'Additional Mathematics': ADDMATHS_SPECIFIC,
         'Chemistry': CHEMISTRY_SPECIFIC + "\n- A Level: Expect deeper understanding of mechanisms (curly arrows) and physical chemistry principles.",
         'Economics': ECONOMICS_SPECIFIC + "\n- A Level: Data response requires direct quoting from text. High-mark essays require nuanced evaluation (Context + Theory).",
         'Computer Science': CS_SPECIFIC + "\n- A Level: AS Level focuses on fundamentals/pseudocode. A2 requires deeper systems understanding and tracing complex algorithms.",
         'ICT': ICT_SPECIFIC,
     }
+    
+    # Handle level display for single-level subjects
+    if level == 'Single Level':
+        level = ''  # Don't mention "Single Level" in the prompt
     
     if exam_board == 'IGCSE':
         marks = IGCSE_MARKS

@@ -13,6 +13,7 @@ from collections import defaultdict
 
 from prompts import get_system_prompt
 from gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer, initialize_caches
+from exam_data import SUBJECT_LEVELS, get_levels_for_subject, get_subjects_for_board
 from supabase_client import (
     log_conversation, save_practice_result, get_practice_history, 
     get_student_by_username, verify_password, get_password_hash, 
@@ -252,6 +253,15 @@ async def approve_student(username: str, admin: dict = Depends(get_current_admin
 async def admin_dashboard(admin: dict = Depends(get_current_admin)):
     data = get_admin_dashboard_data()
     return data
+
+@app.get("/api/subjects/{exam_board}")
+async def get_subjects(exam_board: str):
+    """Return available subjects and their levels for a board."""
+    subjects = get_subjects_for_board(exam_board)
+    result = {}
+    for subject in subjects:
+        result[subject] = get_levels_for_subject(subject, exam_board)
+    return result
 
 # --- Chat & AI Endpoints ---
 

@@ -5,7 +5,11 @@ from pydantic import BaseModel, Field
 from typing import List, Literal
 from prompts import get_system_prompt
 
-client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
+client = None
+try:
+    client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
+except Exception as e:
+    print(f"Warning: Gemini client initialization failed: {e}")
 MODEL = 'gemini-3.1-flash-lite-preview'
 
 import base64
