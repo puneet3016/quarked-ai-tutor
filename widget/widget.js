@@ -382,6 +382,7 @@
                     <select class="qk-select" id="qk-subject-select">
                         <option value="Physics" ${initialValues.subject === 'Physics' ? 'selected' : ''}>Physics</option>
                         <option value="Mathematics" ${initialValues.subject === 'Mathematics' ? 'selected' : ''}>Mathematics</option>
+                        <option value="Additional Mathematics" ${initialValues.subject === 'Additional Mathematics' ? 'selected' : ''}>Additional Mathematics</option>
                         <option value="Chemistry" ${initialValues.subject === 'Chemistry' ? 'selected' : ''}>Chemistry</option>
                         <option value="Economics" ${initialValues.subject === 'Economics' ? 'selected' : ''}>Economics</option>
                         <option value="Computer Science" ${initialValues.subject === 'Computer Science' ? 'selected' : ''}>Computer Science</option>
