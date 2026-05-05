@@ -451,10 +451,10 @@
         const board = boardSelect.value;
         const currentLevel = initialValues.level || levelSelect.value;
         
-        const apiUrl = API_URL;
+        const apiUrl = (scriptTag && scriptTag.getAttribute('data-api-url')) ? scriptTag.getAttribute('data-api-url') : 'https://quarked-ai-tutor-production.up.railway.app';
         
         try {
-            const response = await fetch(`${apiUrl}/api/subjects/${board}`);
+            const response = await fetch(`${apiUrl}/api/subjects/${encodeURIComponent(board)}`);
             const subjects = await response.json();
             const levels = subjects[subject] || [];
             
@@ -486,10 +486,10 @@
 
     async function updateSubjectDropdown() {
         const board = boardSelect.value;
-        const apiUrl = API_URL;
+        const apiUrl = (scriptTag && scriptTag.getAttribute('data-api-url')) ? scriptTag.getAttribute('data-api-url') : 'https://quarked-ai-tutor-production.up.railway.app';
         
         try {
-            const response = await fetch(`${apiUrl}/api/subjects/${board}`);
+            const response = await fetch(`${apiUrl}/api/subjects/${encodeURIComponent(board)}`);
             const subjects = await response.json();
             
             const currentSubject = initialValues.subject || subjectSelect.value;
