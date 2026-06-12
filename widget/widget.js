@@ -677,11 +677,34 @@
         if (file) {
             const reader = new FileReader();
             reader.onload = function (event) {
-                selectedImageBase64 = event.target.result;
-                imagePreview.src = selectedImageBase64;
-                imagePreviewContainer.style.display = 'block';
-                sendBtn.disabled = false; // allow sending just an image
-                inputEl.focus(); // Focus the textarea so Enter key works right away
+                const img = new Image();
+                img.onload = function () {
+                    const canvas = document.createElement('canvas');
+                    let width = img.width;
+                    let height = img.height;
+                    const max_size = 1024; // max width or height to preserve equation clarity
+                    if (width > height) {
+                        if (width > max_size) {
+                            height *= max_size / width;
+                            width = max_size;
+                        }
+                    } else {
+                        if (height > max_size) {
+                            width *= max_size / height;
+                            height = max_size;
+                        }
+                    }
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+                    selectedImageBase64 = canvas.toDataURL('image/jpeg', 0.8); // Compress to 80% JPEG
+                    imagePreview.src = selectedImageBase64;
+                    imagePreviewContainer.style.display = 'block';
+                    sendBtn.disabled = false;
+                    inputEl.focus();
+                };
+                img.src = event.target.result;
             };
             reader.readAsDataURL(file);
         }
@@ -767,6 +790,15 @@
                 localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
                 renderMessages();
                 return;
+            }
+
+            if (!response.ok) {
+                let errorText = `Error ${response.status}: Failed to connect to Tutor API.`;
+                try {
+                    const errorJson = await response.json();
+                    if (errorJson.detail) errorText = errorJson.detail;
+                } catch(e) {}
+                throw new Error(errorText);
             }
 
             const reader = response.body.getReader();
