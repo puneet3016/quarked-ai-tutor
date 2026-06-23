@@ -84,7 +84,6 @@ def get_or_create_cache(subject: str, exam_board: str, level: str, system_prompt
 
 def get_tutor_response_stream(user_message: str, conversation_history: list, system_prompt: str, subject: str, exam_board: str, level: str, latest_image: str = None):
     """Stream a tutoring response for real-time display."""
-    cache = get_or_create_cache(subject, exam_board, level, system_prompt)
     
     contents = []
     for msg in conversation_history:
@@ -92,7 +91,7 @@ def get_tutor_response_stream(user_message: str, conversation_history: list, sys
         clean_text = strip_images_from_text(msg['content'])
         contents.append(types.Content(role=role, parts=[types.Part.from_text(text=clean_text)]))
         
-    user_parts = [types.Part.from_text(text=strip_images_from_text(user_message))]
+    user_parts = [types.Part.from_text(text=strip_images_from_text(user_message) or "Please analyze the image I've uploaded.")]
     
     if latest_image:
         try:
@@ -116,18 +115,13 @@ def get_tutor_response_stream(user_message: str, conversation_history: list, sys
 
     contents.append(types.Content(role='user', parts=user_parts))
 
-    if cache:
-        config = types.GenerateContentConfig(
-            cached_content=cache.name,
-            temperature=0.3,
-            max_output_tokens=2000,
-        )
-    else:
-        config = types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            temperature=0.3,
-            max_output_tokens=2000,
-        )
+    # Always use inline system_instruction (context caching requires 32k+ tokens
+    # which our prompts don't meet, causing hangs with gemini-3.5-flash)
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        temperature=0.3,
+        max_output_tokens=2000,
+    )
 
     response = None
     try:

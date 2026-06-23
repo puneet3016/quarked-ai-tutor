@@ -55,7 +55,9 @@ def increment_rate_limit(ip: str):
 
 @app.on_event("startup")
 async def startup():
-    initialize_caches()
+    # Context caching disabled — using inline system_instruction instead
+    # initialize_caches()
+    print("Quarked AI Tutor backend started (gemini-3.5-flash, no caching)")
 
 app.add_middleware(
     CORSMiddleware,
