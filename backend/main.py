@@ -434,48 +434,6 @@ async def reset_admin_password(secret: str):
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/api/debug/admin-login")
-async def debug_admin_login():
-    try:
-        import os, socket, urllib.parse
-        url = os.environ.get("SUPABASE_URL", "")
-        key = os.environ.get("SUPABASE_KEY", "")
-        
-        # Mask URL and Key for safety
-        url_masked = url[:15] + "..." + url[-10:] if len(url) > 25 else url
-        key_len = len(key)
-        
-        # Extract hostname
-        hostname = ""
-        dns_err = ""
-        try:
-            parsed = urllib.parse.urlparse(url)
-            hostname = parsed.netloc or parsed.path.split('/')[0]
-            # Try lookup
-            ip = socket.gethostbyname(hostname)
-            dns_lookup = f"Resolved {hostname} to {ip}"
-        except Exception as e:
-            dns_lookup = "Failed"
-            dns_err = str(e)
-            
-        # Try google lookup
-        try:
-            google_ip = socket.gethostbyname("google.com")
-            google_dns = f"Resolved google.com to {google_ip}"
-        except Exception as e:
-            google_dns = f"Failed: {e}"
-            
-        return {
-            "supabase_url_masked": url_masked,
-            "supabase_key_length": key_len,
-            "extracted_hostname": hostname,
-            "supabase_dns_lookup": dns_lookup,
-            "supabase_dns_error": dns_err,
-            "google_dns_lookup": google_dns
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
 # Serve the widget
 @app.get("/widget/widget.js")
 async def serve_widget():
