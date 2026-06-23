@@ -18,7 +18,7 @@ from supabase_client import (
     log_conversation, save_practice_result, get_practice_history, 
     get_student_by_username, verify_password, get_password_hash, 
     create_student, approve_student_in_db, log_session_action,
-    get_admin_dashboard_data
+    get_admin_dashboard_data, update_student_password
 )
 
 load_dotenv()
@@ -117,6 +117,15 @@ class RegisterRequest(BaseModel):
     subjects: list[str]
     username: str
     password: str
+
+class AdminResetPasswordRequest(BaseModel):
+    username: str
+    new_password: str
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
 
 # --- JWT Auth Middleware ---
 def create_access_token(data: dict):
@@ -243,6 +252,18 @@ async def login_for_access_token(request: AuthRequest):
         "session_id": session_id
     }
 
+@app.post("/api/auth/change-password")
+async def change_password(request: ChangePasswordRequest, current_user: dict = Depends(get_current_user)):
+    if not verify_password(request.old_password, current_user['password_hash']):
+        raise HTTPException(status_code=400, detail="Incorrect old password")
+    
+    new_hash = get_password_hash(request.new_password)
+    result = update_student_password(current_user['username'], new_hash)
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to update password")
+    
+    return {"message": "Password changed successfully"}
+
 # --- Admin Endpoints ---
 @app.post("/api/admin/approve/{username}")
 async def approve_student(username: str, admin: dict = Depends(get_current_admin)):
@@ -250,6 +271,19 @@ async def approve_student(username: str, admin: dict = Depends(get_current_admin
     if not result:
         raise HTTPException(status_code=404, detail="Student not found")
     return {"message": f"Student {username} approved"}
+
+@app.post("/api/admin/reset-password")
+async def admin_reset_password(request: AdminResetPasswordRequest, admin: dict = Depends(get_current_admin)):
+    user = get_student_by_username(request.username.lower().strip())
+    if not user:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    new_hash = get_password_hash(request.new_password)
+    result = update_student_password(request.username.lower().strip(), new_hash)
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to update password")
+    
+    return {"message": f"Password for {request.username} has been reset successfully"}
 
 @app.get("/api/admin/dashboard")
 async def admin_dashboard(admin: dict = Depends(get_current_admin)):

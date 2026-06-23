@@ -144,3 +144,14 @@ def get_practice_history(student_id: str):
     except Exception as e:
         print(f"Error retrieving practice history: {e}")
         return []
+
+def update_student_password(username: str, new_password_hash: str):
+    """Update password hash for a student by username."""
+    try:
+        supabase = get_supabase()
+        response = supabase.table('students').update({'password_hash': new_password_hash}).eq('username', username).execute()
+        return response.data[0] if response.data else None
+    except Exception as e:
+        print(f"Error updating password: {e}")
+        return None
+
