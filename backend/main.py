@@ -14,14 +14,16 @@ from collections import defaultdict
 from typing import Literal
 
 from prompts import get_system_prompt
-from gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer, MODEL
+from gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer
 from exam_data import SUBJECT_LEVELS, get_levels_for_subject, get_subjects_for_board
 from supabase_client import (
     verify_supabase_jwt, get_student_by_id, create_student,
     get_students_list, save_consent, get_consents_for_student,
-    get_consent_events, create_session, log_interaction,
+    get_consent_events, create_session,
     get_admin_dashboard_data, get_student_interactions, get_supabase
 )
+import budget_guard
+from budget_guard import MODEL
 
 load_dotenv()
 
@@ -67,7 +69,7 @@ def increment_rate_limit(ip: str):
 
 @app.on_event("startup")
 async def startup():
-    print("Quarked AI Tutor backend started (Schema v2 active)")
+    print(f"Quarked AI Tutor backend started (Schema v2 active | Model: {MODEL})")
 
 app.add_middleware(
     CORSMiddleware,
@@ -194,11 +196,9 @@ async def login(request: AuthRequest):
 async def register_student(request: StudentCreateRequest, current_user = Depends(get_current_user)):
     managed_by = None
     try:
-        # Check if the user ID is a valid UUID (Supabase Auth ID)
         uuid.UUID(current_user["id"])
         managed_by = current_user["id"]
     except ValueError:
-        # Local admin has "admin" as ID, set managed_by to None to avoid foreign key error
         pass
 
     student_data = {
@@ -236,7 +236,6 @@ async def add_student_consent(student_id: str, request: ConsentRequest, current_
         "verify_ref": request.verify_ref
     }
     
-    # Check if withdrawing
     if request.status == "withdrawn":
         consent_data["withdrawn_at"] = datetime.utcnow().isoformat()
         
@@ -261,17 +260,6 @@ async def admin_dashboard(current_user = Depends(get_current_user)):
 
 
 # --- Chat & AI Endpoints ---
-
-def estimate_cost(model_name: str, input_tokens: int, output_tokens: int) -> float:
-    input_rate = 0.10 / 1_000_000
-    output_rate = 0.40 / 1_000_000
-    if "3.5" in model_name:
-        input_rate = 1.50 / 1_000_000
-        output_rate = 9.00 / 1_000_000
-    elif "1.5" in model_name:
-        input_rate = 0.35 / 1_000_000
-        output_rate = 1.50 / 1_000_000
-    return (input_tokens * input_rate) + (output_tokens * output_rate)
 
 async def classify_and_log_interaction(
     session_id: str, 
@@ -312,7 +300,6 @@ async def classify_and_log_interaction(
 
         input_tokens = (2500 + len(question_text) + len(response_text)) // 4
         output_tokens = len(response_text) // 4
-        cost = estimate_cost(model, input_tokens, output_tokens)
 
         try:
             resp = client.models.generate_content(
@@ -330,32 +317,37 @@ async def classify_and_log_interaction(
             difficulty = "medium"
             resolved = True
             
-        log_interaction({
-            "session_id": session_id,
-            "student_id": student_id,
-            "subject": subject,
-            "topic": topic,
-            "difficulty": difficulty,
-            "resolved": resolved,
-            "question_text": question_text,
-            "model": model,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cost_usd": cost
-        })
+        budget_guard.log_interaction(
+            session_id=session_id,
+            student_id=student_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            subject=subject,
+            topic=topic,
+            difficulty=difficulty,
+            resolved=resolved,
+            question_text=question_text
+        )
     except Exception as e:
         print(f"Error in classify_and_log_interaction background task: {e}")
 
 
 @app.post("/api/chat")
 async def chat(request: ChatRequest, req: Request, background_tasks: BackgroundTasks):
-    # 1. Gating & Verification
+    current_message = request.messages[-1].content
+
+    # 1. Gating, Consent, & Budget Verification
     if request.student_id:
-        student = get_student_by_id(request.student_id)
-        if not student:
-            raise HTTPException(status_code=404, detail="Student record not found")
-        if not student.get('active'):
-            raise HTTPException(status_code=403, detail="Student is pending tutoring consent by parent.")
+        # Layer 1: Consent Gate
+        budget_guard.require_consent(request.student_id, "tutoring")
+        
+        # Student Daily Cap Check
+        budget_guard.check_student_daily_cap(request.student_id)
+        
+        # Layer 2: Budget Gate (pre-check with estimated input size)
+        est_input = len(current_message) // 4
+        budget_guard.check_budget(est_input)
     else:
         # Rate limit unauthenticated (public widget) users
         client_ip = req.headers.get("x-forwarded-for", req.client.host).split(",")[0].strip()
@@ -371,7 +363,6 @@ async def chat(request: ChatRequest, req: Request, background_tasks: BackgroundT
     if len(history_msgs) > 10:
         history_msgs = history_msgs[-10:]
     history = [{"role": m.role, "content": m.content} for m in history_msgs]
-    current_message = request.messages[-1].content
 
     system_prompt = get_system_prompt(request.subject, request.exam_board, request.level)
 

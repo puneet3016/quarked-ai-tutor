@@ -10,7 +10,7 @@ try:
     client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
 except Exception as e:
     print(f"Warning: Gemini client initialization failed: {e}")
-MODEL = 'gemini-3.5-flash'
+from budget_guard import MODEL
 
 import base64
 import re
