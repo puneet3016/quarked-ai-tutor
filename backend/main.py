@@ -420,18 +420,14 @@ async def reset_admin_password(secret: str):
 @app.get("/api/debug/admin-login")
 async def debug_admin_login():
     try:
-        import os
-        from supabase_client import get_student_by_username, verify_password, get_password_hash
-        user = get_student_by_username("admin")
-        
-        env_keys = list(os.environ.keys())
-        supa_keys = [k for k in env_keys if 'supa' in k.lower()]
-        
+        from supabase_client import get_supabase
+        supabase = get_supabase()
+        response = supabase.table('students').select('username').execute()
+        usernames = [r.get('username') for r in response.data] if response.data else []
         return {
-            "error_fallback": "If user is null, check env keys",
-            "has_user_in_db": user is not None,
-            "supabase_env_keys_present": supa_keys,
-            "all_env_keys": env_keys
+            "database_connected": True,
+            "total_students": len(usernames),
+            "usernames_in_db": usernames
         }
     except Exception as e:
         return {"error": str(e)}
