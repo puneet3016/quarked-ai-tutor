@@ -6,7 +6,9 @@ from pydantic import BaseModel
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
+from jose import jwt, JWTError
+from passlib.context import CryptContext
 from dotenv import load_dotenv
 from collections import defaultdict
 from typing import Literal
@@ -25,6 +27,21 @@ load_dotenv()
 
 app = FastAPI(title="Quarked AI Tutor Backend")
 security = HTTPBearer()
+
+# Password verification for compatibility admin login
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+SECRET_KEY = os.environ.get("JWT_SECRET", "super-secret-default-key-please-change-in-prod")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
+
+# Admin hash generated for 'puneetteenukrisha3055@&*'
+ADMIN_PASSWORD_HASH = "$2b$12$T1xohQQ3LwPwB2r726siMe1UK32kWj40T19xOzn53pcOeq2hQHJne"
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 # Rate limiting for public widget (unregistered / unauthenticated users)
 PUBLIC_RATE_LIMIT = 5  # max questions per IP per day
@@ -113,29 +130,77 @@ class ConsentRequest(BaseModel):
     verify_method: str = "otp"
     verify_ref: str | None = None
 
+class AuthRequest(BaseModel):
+    username: str
+    password: str
+
 
 # --- Auth Middleware (Staff Only) ---
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Dependency that verifies tutor/staff authentication using Supabase JWT."""
+    """Dependency that verifies tutor/staff authentication using either local Admin JWT or Supabase JWT."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    
+    # 1. Try local JWT decode (compatibility for admin login)
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username == "admin":
+            return {"id": "admin", "username": "admin", "is_admin": True}
+    except Exception:
+        pass
+
+    # 2. Fallback to Supabase Auth JWT verification
     user = verify_supabase_jwt(credentials.credentials)
     if user is None:
         raise credentials_exception
-    return user
+    return {"id": user.id, "email": user.email, "username": user.email, "is_admin": True}
 
 async def get_current_admin(current_user: dict = Depends(get_current_user)):
     """In beta, any authenticated staff member is authorized."""
     return current_user
 
 
+# --- Compatibility Auth Endpoint ---
+@app.post("/api/auth/login")
+async def login(request: AuthRequest):
+    username = request.username.lower().strip()
+    if username != "admin":
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+        
+    if not pwd_context.verify(request.password, ADMIN_PASSWORD_HASH):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+        
+    access_token = create_access_token(data={"sub": "admin"})
+    
+    return {
+        "token": access_token,
+        "student": {
+            "name": "Puneet Sharma",
+            "username": "admin",
+            "isAdmin": True,
+            "uuid": "admin"
+        },
+        "session_id": str(uuid.uuid4())
+    }
+
+
 # --- Student Management Endpoints (Staff Only) ---
 
 @app.post("/api/students")
 async def register_student(request: StudentCreateRequest, current_user = Depends(get_current_user)):
+    managed_by = None
+    try:
+        # Check if the user ID is a valid UUID (Supabase Auth ID)
+        uuid.UUID(current_user["id"])
+        managed_by = current_user["id"]
+    except ValueError:
+        # Local admin has "admin" as ID, set managed_by to None to avoid foreign key error
+        pass
+
     student_data = {
         "name": request.name.strip(),
         "grade": request.grade,
@@ -145,7 +210,7 @@ async def register_student(request: StudentCreateRequest, current_user = Depends
         "parent_phone": request.parent_phone,
         "is_minor": request.is_minor,
         "active": False,
-        "managed_by": current_user.id
+        "managed_by": managed_by
     }
     result = create_student(student_data)
     if not result:
@@ -221,7 +286,6 @@ async def classify_and_log_interaction(
     """Background task to run a fast classification of the exchange and log the billing/interaction."""
     try:
         from gemini_client import client
-        from google.genai import types
         
         classification_prompt = f"""You are an educational analytics classifier. Analyze this tutor-student exchange.
         
