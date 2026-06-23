@@ -1,26 +1,58 @@
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
-from passlib.context import CryptContext
+from cryptography.fernet import Fernet
 
 load_dotenv()
 
-# Password hashing setup
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Initialize encryption key
+ENCRYPTION_KEY = os.environ.get("CHAT_ENCRYPTION_KEY", "")
+if not ENCRYPTION_KEY:
+    # Fallback key generated for local development so it doesn't crash on start
+    ENCRYPTION_KEY = Fernet.generate_key().decode()
+    print("WARNING: CHAT_ENCRYPTION_KEY not set. Using temporary generated key.")
+
+fernet = Fernet(ENCRYPTION_KEY.encode())
+
+def encrypt_text(plain_text: str) -> str:
+    if not plain_text:
+        return plain_text
+    return fernet.encrypt(plain_text.encode()).decode()
+
+def decrypt_text(cipher_text: str) -> str:
+    if not cipher_text:
+        return cipher_text
+    try:
+        return fernet.decrypt(cipher_text.encode()).decode()
+    except Exception as e:
+        print(f"Error decrypting text: {e}")
+        return "[Decryption Failed]"
 
 def get_supabase() -> Client:
-    """Initialize and return a Supabase client."""
+    """Initialize and return a Supabase client using the service_role key to bypass RLS."""
     url = os.environ.get("SUPABASE_URL", "")
-    key = os.environ.get("SUPABASE_KEY", "")
+    key = os.environ.get("SUPABASE_KEY", "")  # This should be the service_role key in prod
     if not url or not key:
         print("WARNING: Supabase URL or Key not found in environment")
     return create_client(url, key)
 
-def get_student_by_username(username: str):
-    """Fetch a user by username to verify during login."""
+def verify_supabase_jwt(jwt_token: str):
+    """Verify a Supabase Auth JWT token and return the user object."""
     try:
         supabase = get_supabase()
-        response = supabase.table('students').select('*').eq('username', username).execute()
+        response = supabase.auth.get_user(jwt_token)
+        if response and response.user:
+            return response.user
+        return None
+    except Exception as e:
+        print(f"Error verifying Supabase JWT: {e}")
+        return None
+
+def get_student_by_id(student_id: str):
+    """Fetch student profile by ID."""
+    try:
+        supabase = get_supabase()
+        response = supabase.table('students').select('*').eq('id', student_id).execute()
         if response.data:
             return response.data[0]
         return None
@@ -28,14 +60,8 @@ def get_student_by_username(username: str):
         print(f"Error getting student: {e}")
         return None
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
-
-def get_password_hash(password):
-    return pwd_context.hash(password)
-
 def create_student(student_data: dict):
-    """Insert a new pending student registration."""
+    """Create a new student record (managed by staff)."""
     try:
         supabase = get_supabase()
         response = supabase.table('students').insert(student_data).execute()
@@ -44,114 +70,102 @@ def create_student(student_data: dict):
         print(f"Error creating student: {e}")
         return None
 
-def approve_student_in_db(username: str):
-    """Admin function to approve a student."""
+def get_students_list():
+    """Fetch all students for staff dashboards."""
     try:
         supabase = get_supabase()
-        response = supabase.table('students').update({'approved': True}).eq('username', username).execute()
-        return response.data[0] if response.data else None
+        response = supabase.table('students').select('*').order('created_at', desc=True).execute()
+        return response.data if response.data else []
     except Exception as e:
-        print(f"Error approving student: {e}")
-        return None
-
-def log_session_action(session_id: str, student_uuid: str, school_id: str, action: str, subject: str = None, question_preview: str = None, response_length: int = None):
-    """Tracks every login, logout, and question asked."""
-    try:
-        supabase = get_supabase()
-        data = {
-            'session_id': session_id,
-            'student_uuid': student_uuid,
-            'school_id': school_id,
-            'action': action,
-        }
-        if subject: data['subject'] = subject
-        if question_preview: data['question_preview'] = question_preview
-        if response_length: data['response_length'] = response_length
-        supabase.table('sessions').insert(data).execute()
-    except Exception as e:
-        print(f"Error logging session action {action}: {e}")
-
-def get_admin_dashboard_data():
-    """Fetches overview metrics for the admin dashboard."""
-    try:
-        supabase = get_supabase()
-        sessions = supabase.table('sessions').select('*').order('created_at', desc=True).limit(200).execute()
-        students = supabase.table('students').select('username, full_name, school_id, other_school, board, subjects, uuid, approved, is_admin').execute()
-        return {
-            "sessions": sessions.data,
-            "students": [s for s in students.data if s.get('is_admin') != True],
-            "pending": [s for s in students.data if s.get('approved') == False and s.get('is_admin') != True]
-        }
-    except Exception as e:
-        print(f"Error getting admin data: {e}")
-        return {"sessions": [], "students": [], "pending": []}
-
-def log_conversation(student_id: str, subject: str, exam_board: str, level: str, messages: list, source: str = 'web'):
-    """Log conversation messages to Supabase."""
-    try:
-        supabase = get_supabase()
-        supabase.table('conversations').insert({
-            'student_id': student_id,
-            'subject': subject,
-            'exam_board': exam_board,
-            'level': level,
-            'messages': messages,
-            'source': source
-        }).execute()
-    except Exception as e:
-        print(f"Error logging conversation: {e}")
-
-def get_student_profile_by_token(token: str):
-    """Old stub profile fetched by stub auth token."""
-    try:
-        supabase = get_supabase()
-        response = supabase.table('students').select('*').eq('auth_token', token).execute()
-        if response.data:
-            return response.data[0]
-        return None
-    except Exception as e:
-        print(f"Error getting profile: {e}")
-        return None
-
-def save_practice_result(student_id: str, subject: str, topic: str, exam_board: str, level: str, 
-                         question: str, command_term: str, student_answer: str, 
-                         marks_awarded: int, marks_available: int, feedback: str):
-    """Save practice marking results."""
-    try:
-        supabase = get_supabase()
-        supabase.table('practice_results').insert({
-            'student_id': student_id,
-            'subject': subject,
-            'topic': topic,
-            'exam_board': exam_board,
-            'level': level,
-            'question_text': question,
-            'command_term': command_term,
-            'student_answer': student_answer,
-            'marks_awarded': marks_awarded,
-            'marks_available': marks_available,
-            'feedback': feedback
-        }).execute()
-    except Exception as e:
-        print(f"Error saving practice result: {e}")
-
-def get_practice_history(student_id: str):
-    """Retrieve practice history for a user."""
-    try:
-        supabase = get_supabase()
-        response = supabase.table('practice_results').select('*').eq('student_id', student_id).order('created_at', desc=True).execute()
-        return response.data
-    except Exception as e:
-        print(f"Error retrieving practice history: {e}")
+        print(f"Error getting students list: {e}")
         return []
 
-def update_student_password(username: str, new_password_hash: str):
-    """Update password hash for a student by username."""
+def save_consent(consent_data: dict):
+    """Save or update parental consent status."""
     try:
         supabase = get_supabase()
-        response = supabase.table('students').update({'password_hash': new_password_hash}).eq('username', username).execute()
+        response = supabase.table('consents').upsert(
+            consent_data, 
+            on_conflict='student_id,purpose'
+        ).execute()
         return response.data[0] if response.data else None
     except Exception as e:
-        print(f"Error updating password: {e}")
+        print(f"Error saving consent: {e}")
         return None
 
+def get_consents_for_student(student_id: str):
+    """Fetch all consent records for a specific student."""
+    try:
+        supabase = get_supabase()
+        response = supabase.table('consents').select('*').eq('student_id', student_id).execute()
+        return response.data if response.data else []
+    except Exception as e:
+        print(f"Error getting consents: {e}")
+        return []
+
+def get_consent_events(student_id: str):
+    """Fetch the append-only audit trail for a student."""
+    try:
+        supabase = get_supabase()
+        response = supabase.table('consent_events').select('*').eq('student_id', student_id).order('event_at', desc=True).execute()
+        return response.data if response.data else []
+    except Exception as e:
+        print(f"Error getting consent events: {e}")
+        return []
+
+def create_session(student_id: str, model: str):
+    """Create a new chat session."""
+    try:
+        supabase = get_supabase()
+        response = supabase.table('sessions').insert({
+            'student_id': student_id,
+            'model': model
+        }).execute()
+        return response.data[0] if response.data else None
+    except Exception as e:
+        print(f"Error creating session: {e}")
+        return None
+
+def log_interaction(interaction_data: dict):
+    """Log a single-turn chat interaction (with encrypted question text)."""
+    try:
+        supabase = get_supabase()
+        # Encrypt the question text before saving to database
+        if 'question_text' in interaction_data:
+            interaction_data['question_text'] = encrypt_text(interaction_data['question_text'])
+            
+        response = supabase.table('interactions').insert(interaction_data).execute()
+        return response.data[0] if response.data else None
+    except Exception as e:
+        print(f"Error logging interaction: {e}")
+        return None
+
+def get_admin_dashboard_data():
+    """Fetch stats and data for the staff admin dashboard."""
+    try:
+        supabase = get_supabase()
+        # Get students
+        students = supabase.table('students').select('*').execute()
+        # Get latest interactions
+        interactions = supabase.table('interactions').select('id, student_id, created_at, subject, topic, cost_usd').order('created_at', desc=True).limit(100).execute()
+        # Get monthly spend aggregation
+        spend = supabase.table('monthly_spend_usd').select('*').execute()
+        
+        return {
+            "students": students.data if students.data else [],
+            "recent_interactions": interactions.data if interactions.data else [],
+            "monthly_spend": spend.data if spend.data else []
+        }
+    except Exception as e:
+        print(f"Error getting admin dashboard data: {e}")
+        return {"students": [], "recent_interactions": [], "monthly_spend": []}
+
+def get_student_interactions(student_id: str):
+    """Fetch all interactions for a specific student to show progress history."""
+    try:
+        supabase = get_supabase()
+        response = supabase.table('interactions').select('id, created_at, subject, topic, difficulty, resolved').eq('student_id', student_id).order('created_at', desc=True).execute()
+        return response.data if response.data else []
+    except Exception as e:
+        print(f"Error getting student interactions: {e}")
+        return []

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, Depends, Response, status
+from fastapi import FastAPI, HTTPException, Request, Depends, Response, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -6,32 +6,27 @@ from pydantic import BaseModel
 import json
 import os
 import uuid
-from datetime import datetime, timedelta
-from jose import JWTError, jwt
+from datetime import datetime
 from dotenv import load_dotenv
 from collections import defaultdict
+from typing import Literal
 
 from prompts import get_system_prompt
-from gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer, initialize_caches
+from gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer, MODEL
 from exam_data import SUBJECT_LEVELS, get_levels_for_subject, get_subjects_for_board
 from supabase_client import (
-    log_conversation, save_practice_result, get_practice_history, 
-    get_student_by_username, verify_password, get_password_hash, 
-    create_student, approve_student_in_db, log_session_action,
-    get_admin_dashboard_data, update_student_password
+    verify_supabase_jwt, get_student_by_id, create_student,
+    get_students_list, save_consent, get_consents_for_student,
+    get_consent_events, create_session, log_interaction,
+    get_admin_dashboard_data, get_student_interactions, get_supabase
 )
 
 load_dotenv()
 
-# JWT Config
-SECRET_KEY = os.environ.get("JWT_SECRET", "super-secret-default-key-please-change-in-prod")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 7 days
-
 app = FastAPI(title="Quarked AI Tutor Backend")
 security = HTTPBearer()
 
-# Rate limiting for public widget (unauthenticated users)
+# Rate limiting for public widget (unregistered / unauthenticated users)
 PUBLIC_RATE_LIMIT = 5  # max questions per IP per day
 rate_limit_store = defaultdict(lambda: {"count": 0, "date": datetime.utcnow().date()})
 
@@ -55,9 +50,7 @@ def increment_rate_limit(ip: str):
 
 @app.on_event("startup")
 async def startup():
-    # Context caching disabled — using inline system_instruction instead
-    # initialize_caches()
-    print("Quarked AI Tutor backend started (gemini-3.5-flash, no caching)")
+    print("Quarked AI Tutor backend started (Schema v2 active)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -73,7 +66,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Models ---
+# --- Request Models ---
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -85,7 +78,7 @@ class ChatRequest(BaseModel):
     exam_board: str
     level: str
     session_id: str | None = None
-    student_id: str | None = None # Legacy support
+    student_id: str | None = None
 
 class GenerateRequest(BaseModel):
     subject: str
@@ -104,234 +97,235 @@ class MarkRequest(BaseModel):
     student_answer: str
     student_id: str | None = None
 
-class AuthRequest(BaseModel):
-    username: str
-    password: str
-
-class RegisterRequest(BaseModel):
-    full_name: str
-    phone: str
-    school_id: str
-    other_school: str | None = None
+class StudentCreateRequest(BaseModel):
+    name: str
+    grade: str | None = None
     board: str
-    subjects: list[str]
-    username: str
-    password: str
+    parent_name: str
+    parent_email: str
+    parent_phone: str | None = None
+    is_minor: bool = True
 
-class AdminResetPasswordRequest(BaseModel):
-    username: str
-    new_password: str
+class ConsentRequest(BaseModel):
+    purpose: str
+    status: str
+    granted_by: str
+    verify_method: str = "otp"
+    verify_ref: str | None = None
 
-class ChangePasswordRequest(BaseModel):
-    old_password: str
-    new_password: str
 
-
-# --- JWT Auth Middleware ---
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
+# --- Auth Middleware (Staff Only) ---
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Dependency that verifies tutor/staff authentication using Supabase JWT."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-        
-    user = get_student_by_username(username)
+    user = verify_supabase_jwt(credentials.credentials)
     if user is None:
         raise credentials_exception
     return user
 
 async def get_current_admin(current_user: dict = Depends(get_current_user)):
-    if not current_user.get("is_admin"):
-        raise HTTPException(status_code=403, detail="Not authorized. Admin access required.")
+    """In beta, any authenticated staff member is authorized."""
     return current_user
 
-async def get_optional_user(request: Request):
-    """Returns user dict if valid JWT present, None otherwise. Used for public widget."""
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return None
-    try:
-        token = auth_header.split(" ")[1]
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        if username:
-            user = get_student_by_username(username)
-            return user
-    except Exception:
-        pass
-    return None
 
-# --- Authentication Endpoints ---
+# --- Student Management Endpoints (Staff Only) ---
 
-@app.post("/api/auth/register")
-async def register_student(request: RegisterRequest):
-    # Check if username exists
-    existing = get_student_by_username(request.username)
-    if existing:
-        raise HTTPException(status_code=400, detail="Username already taken")
-        
-    # Create student dictionary matching Supabase schema
+@app.post("/api/students")
+async def register_student(request: StudentCreateRequest, current_user = Depends(get_current_user)):
     student_data = {
-        "username": request.username.lower().strip(),
-        "password_hash": get_password_hash(request.password),
-        "full_name": request.full_name,
-        "phone": request.phone,
-        "school_id": request.school_id,
-        "other_school": request.other_school if request.school_id == 'other' else None,
+        "name": request.name.strip(),
+        "grade": request.grade,
         "board": request.board,
-        "subjects": request.subjects,
-        "approved": False,
-        "is_admin": False
+        "parent_name": request.parent_name.strip(),
+        "parent_email": request.parent_email.lower().strip(),
+        "parent_phone": request.parent_phone,
+        "is_minor": request.is_minor,
+        "active": False,
+        "managed_by": current_user.id
     }
-    
     result = create_student(student_data)
     if not result:
-        raise HTTPException(status_code=500, detail="Failed to create account")
-        
-    return {
-        "uuid": result.get("uuid"), 
-        "username": result.get("username"),
-        "message": "Registration pending approval"
-    }
-
-@app.post("/api/auth/login")
-async def login_for_access_token(request: AuthRequest):
-    user = get_student_by_username(request.username.lower().strip())
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-        
-    if not verify_password(request.password, user['password_hash']):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-        
-    if not user.get('approved') and not user.get('is_admin'):
-        raise HTTPException(status_code=403, detail="Your account is pending approval by Puneet.")
-        
-    # Create JWT token
-    access_token = create_access_token(data={"sub": user["username"]})
-    
-    # Generate session UUID
-    session_id = str(uuid.uuid4())
-    
-    # Log the login!
-    log_session_action(
-        session_id=session_id,
-        student_uuid=user['uuid'], 
-        school_id=user['school_id'],
-        action="LOGIN"
-    )
-    
-    # Send safe data down to frontend
-    safe_user = {
-        "name": user["full_name"],
-        "username": user["username"],
-        "school_id": user["school_id"],
-        "other_school": user["other_school"],
-        "subjects": user["subjects"],
-        "board": user["board"],
-        "uuid": user["uuid"],
-        "isAdmin": user.get("is_admin", False)
-    }
-    
-    return {
-        "token": access_token,
-        "student": safe_user,
-        "session_id": session_id
-    }
-
-@app.post("/api/auth/change-password")
-async def change_password(request: ChangePasswordRequest, current_user: dict = Depends(get_current_user)):
-    if not verify_password(request.old_password, current_user['password_hash']):
-        raise HTTPException(status_code=400, detail="Incorrect old password")
-    
-    new_hash = get_password_hash(request.new_password)
-    result = update_student_password(current_user['username'], new_hash)
-    if not result:
-        raise HTTPException(status_code=500, detail="Failed to update password")
-    
-    return {"message": "Password changed successfully"}
-
-# --- Admin Endpoints ---
-@app.post("/api/admin/approve/{username}")
-async def approve_student(username: str, admin: dict = Depends(get_current_admin)):
-    result = approve_student_in_db(username)
-    if not result:
-        raise HTTPException(status_code=404, detail="Student not found")
-    return {"message": f"Student {username} approved"}
-
-@app.post("/api/admin/reset-password")
-async def admin_reset_password(request: AdminResetPasswordRequest, admin: dict = Depends(get_current_admin)):
-    user = get_student_by_username(request.username.lower().strip())
-    if not user:
-        raise HTTPException(status_code=404, detail="Student not found")
-    
-    new_hash = get_password_hash(request.new_password)
-    result = update_student_password(request.username.lower().strip(), new_hash)
-    if not result:
-        raise HTTPException(status_code=500, detail="Failed to update password")
-    
-    return {"message": f"Password for {request.username} has been reset successfully"}
-
-@app.get("/api/admin/dashboard")
-async def admin_dashboard(admin: dict = Depends(get_current_admin)):
-    data = get_admin_dashboard_data()
-    return data
-
-@app.get("/api/subjects/{exam_board}")
-async def get_subjects(exam_board: str):
-    """Return available subjects and their levels for a board."""
-    subjects = get_subjects_for_board(exam_board)
-    result = {}
-    for subject in subjects:
-        result[subject] = get_levels_for_subject(subject, exam_board)
+        raise HTTPException(status_code=500, detail="Failed to create student record")
     return result
+
+@app.get("/api/students")
+async def list_students(current_user = Depends(get_current_user)):
+    return get_students_list()
+
+@app.post("/api/students/{student_id}/consent")
+async def add_student_consent(student_id: str, request: ConsentRequest, current_user = Depends(get_current_user)):
+    student = get_student_by_id(student_id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+        
+    consent_data = {
+        "student_id": student_id,
+        "purpose": request.purpose,
+        "status": request.status,
+        "granted_by": request.granted_by.strip(),
+        "verify_method": request.verify_method,
+        "verify_ref": request.verify_ref
+    }
+    
+    # Check if withdrawing
+    if request.status == "withdrawn":
+        consent_data["withdrawn_at"] = datetime.utcnow().isoformat()
+        
+    result = save_consent(consent_data)
+    if not result:
+        raise HTTPException(status_code=500, detail="Failed to save consent record")
+    return result
+
+@app.get("/api/students/{student_id}/consents")
+async def get_consents(student_id: str, current_user = Depends(get_current_user)):
+    return get_consents_for_student(student_id)
+
+@app.get("/api/students/{student_id}/events")
+async def get_consent_audit_trail(student_id: str, current_user = Depends(get_current_user)):
+    return get_consent_events(student_id)
+
+
+# --- Admin Dashboard ---
+@app.get("/api/admin/dashboard")
+async def admin_dashboard(current_user = Depends(get_current_user)):
+    return get_admin_dashboard_data()
+
 
 # --- Chat & AI Endpoints ---
 
+def estimate_cost(model_name: str, input_tokens: int, output_tokens: int) -> float:
+    input_rate = 0.10 / 1_000_000
+    output_rate = 0.40 / 1_000_000
+    if "3.5" in model_name:
+        input_rate = 1.50 / 1_000_000
+        output_rate = 9.00 / 1_000_000
+    elif "1.5" in model_name:
+        input_rate = 0.35 / 1_000_000
+        output_rate = 1.50 / 1_000_000
+    return (input_tokens * input_rate) + (output_tokens * output_rate)
+
+async def classify_and_log_interaction(
+    session_id: str, 
+    student_id: str, 
+    model: str, 
+    question_text: str, 
+    response_text: str, 
+    subject: str, 
+    exam_board: str, 
+    level: str
+):
+    """Background task to run a fast classification of the exchange and log the billing/interaction."""
+    try:
+        from gemini_client import client
+        from google.genai import types
+        
+        classification_prompt = f"""You are an educational analytics classifier. Analyze this tutor-student exchange.
+        
+        STUDENT QUESTION: {question_text}
+        TUTOR RESPONSE: {response_text}
+        
+        Identify:
+        - Topic (e.g., 'Quadratic equations', 'Linear momentum', 'Photosynthesis')
+        - Difficulty of the question ('easy', 'medium', 'hard')
+        - Resolved: whether the tutor successfully resolved the student's doubt or if the student's doubt is fully answered (true/false)
+        
+        Respond ONLY with a JSON object matching this schema:
+        {{
+            "topic": "string",
+            "difficulty": "easy" | "medium" | "hard",
+            "resolved": true | false
+        }}
+        """
+        
+        class ClassificationResult(BaseModel):
+            topic: str
+            difficulty: Literal["easy", "medium", "hard"]
+            resolved: bool
+
+        input_tokens = (2500 + len(question_text) + len(response_text)) // 4
+        output_tokens = len(response_text) // 4
+        cost = estimate_cost(model, input_tokens, output_tokens)
+
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=classification_prompt,
+                config={'response_mime_type': 'application/json', 'response_schema': ClassificationResult}
+            )
+            result = ClassificationResult.model_validate_json(resp.text)
+            topic = result.topic
+            difficulty = result.difficulty
+            resolved = result.resolved
+        except Exception as ex:
+            print(f"Warning: Gemini classification failed: {ex}. Falling back to default values.")
+            topic = "General Chat"
+            difficulty = "medium"
+            resolved = True
+            
+        log_interaction({
+            "session_id": session_id,
+            "student_id": student_id,
+            "subject": subject,
+            "topic": topic,
+            "difficulty": difficulty,
+            "resolved": resolved,
+            "question_text": question_text,
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost_usd": cost
+        })
+    except Exception as e:
+        print(f"Error in classify_and_log_interaction background task: {e}")
+
+
 @app.post("/api/chat")
-async def chat(request: ChatRequest, req: Request, current_user: dict | None = Depends(get_optional_user)):
-    # Rate limit unauthenticated (public widget) users
-    if current_user is None:
+async def chat(request: ChatRequest, req: Request, background_tasks: BackgroundTasks):
+    # 1. Gating & Verification
+    if request.student_id:
+        student = get_student_by_id(request.student_id)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student record not found")
+        if not student.get('active'):
+            raise HTTPException(status_code=403, detail="Student is pending tutoring consent by parent.")
+    else:
+        # Rate limit unauthenticated (public widget) users
         client_ip = req.headers.get("x-forwarded-for", req.client.host).split(",")[0].strip()
         if not check_rate_limit(client_ip):
             raise HTTPException(
                 status_code=429,
-                detail="You've used your 5 free questions for today! Sign up at our portal for unlimited access."
+                detail="You've used your 5 free questions for today! Please register at the portal."
             )
         increment_rate_limit(client_ip)
 
+    # 2. History Cost Optimization (slice to last 10 messages)
+    history_msgs = request.messages[:-1]
+    if len(history_msgs) > 10:
+        history_msgs = history_msgs[-10:]
+    history = [{"role": m.role, "content": m.content} for m in history_msgs]
+    current_message = request.messages[-1].content
+
+    system_prompt = get_system_prompt(request.subject, request.exam_board, request.level)
+
+    # 3. Create or Validate Session (if student is active)
+    session_id = request.session_id
+    if request.student_id:
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        try:
+            sb = get_supabase()
+            sess_check = sb.table('sessions').select('id').eq('id', session_id).execute()
+            if not sess_check.data:
+                create_session(request.student_id, MODEL)
+        except Exception:
+            create_session(request.student_id, MODEL)
+
     async def generate():
         try:
-            # history context: format for gemini client
-            history = [{"role": m.role, "content": m.content} for m in request.messages[:-1]]
-            current_message = request.messages[-1].content
-            
-            system_prompt = get_system_prompt(request.subject, request.exam_board, request.level)
-            
-            # Log the question if authenticated
-            if request.session_id and current_user:
-                log_session_action(
-                    session_id=request.session_id,
-                    student_uuid=current_user['uuid'],
-                    school_id=current_user['school_id'],
-                    action="QUESTION",
-                    subject=request.subject,
-                    question_preview=current_message[:150]
-                )
-                
             latest_image = request.messages[-1].image
             stream = get_tutor_response_stream(
                 current_message, history, system_prompt, 
@@ -342,18 +336,14 @@ async def chat(request: ChatRequest, req: Request, current_user: dict | None = D
             full_response = ""
             for chunk in stream:
                 full_response += chunk
-                # Still outputting proper JSON formats within the SSE context for the frontend
                 yield f"data: {json.dumps({'text': chunk})}\n\n"
                 
-            # Log completion size if authenticated
-            if request.session_id and current_user:
-                log_session_action(
-                    session_id=request.session_id,
-                    student_uuid=current_user['uuid'],
-                    school_id=current_user['school_id'],
-                    action="RESPONSE",
-                    subject=request.subject,
-                    response_length=len(full_response)
+            # Log the exchange in the background if it was an active student
+            if request.student_id and session_id:
+                background_tasks.add_task(
+                    classify_and_log_interaction,
+                    session_id, request.student_id, MODEL, current_message, full_response,
+                    request.subject, request.exam_board, request.level
                 )
                 
             yield f"data: {json.dumps({'done': True})}\n\n"
@@ -363,8 +353,9 @@ async def chat(request: ChatRequest, req: Request, current_user: dict | None = D
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
+
 @app.post("/api/generate")
-async def generate_questions(request: GenerateRequest, current_user: dict = Depends(get_current_user)):
+async def generate_questions(request: GenerateRequest, current_user = Depends(get_current_user)):
     try:
         qs = generate_practice_questions(
             request.subject, request.topic, request.exam_board, request.level, request.num_questions
@@ -374,70 +365,50 @@ async def generate_questions(request: GenerateRequest, current_user: dict = Depe
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/mark")
-async def mark_answer(request: MarkRequest, current_user: dict = Depends(get_current_user)):
+async def mark_answer(request: MarkRequest, background_tasks: BackgroundTasks):
     try:
         result = mark_student_answer(
             request.question, request.mark_scheme, request.student_answer, request.subject, request.exam_board
         )
         
-        save_practice_result(
-            current_user['uuid'], request.subject, request.topic, request.exam_board, request.level,
-            request.question, "", request.student_answer, result.marks_awarded, result.marks_available,
-            result.feedback
-        )
+        # Log to interactions if student is provided
+        if request.student_id:
+            session_id = str(uuid.uuid4())
+            try:
+                create_session(request.student_id, MODEL)
+            except Exception:
+                pass
+                
+            question_desc = f"Practice Question: {request.question}\nStudent Answer: {request.student_answer}"
+            feedback_desc = f"Marks: {result.marks_awarded}/{result.marks_available}\nFeedback: {result.feedback}"
+            
+            background_tasks.add_task(
+                classify_and_log_interaction,
+                session_id, request.student_id, MODEL, question_desc, feedback_desc,
+                request.subject, request.exam_board, request.level
+            )
             
         return result.model_dump()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/progress")
-async def get_progress(current_user: dict = Depends(get_current_user)):
-    history = get_practice_history(current_user['uuid'])
+async def get_progress(student_id: str, current_user = Depends(get_current_user)):
+    history = get_student_interactions(student_id)
     return {"history": history}
 
-# TEMPORARY: one-time admin password reset - REMOVE after use
-@app.get("/api/reset-admin-pw/{secret}")
-async def reset_admin_password(secret: str):
-    if secret != "quarked-reset-2026":
-        raise HTTPException(status_code=403, detail="Invalid")
-    try:
-        # Check env vars
-        supa_url = os.environ.get("SUPABASE_URL", "")
-        supa_key = os.environ.get("SUPABASE_KEY", "")
-        env_keys = [k for k in os.environ.keys() if 'supa' in k.lower()]
-        if not supa_url:
-            return {"error": "SUPABASE_URL not set", "supabase_env_vars": env_keys}
-        from supabase_client import get_supabase, get_password_hash
-        sb = get_supabase()
-        new_hash = get_password_hash("quarkedadmin")
-        result = sb.table("students").update({"password_hash": new_hash}).eq("username", "admin").execute()
-        if result.data:
-            return {"message": "Admin password reset to quarkedadmin", "user": result.data[0].get("username")}
-        
-        # If admin not found, create it!
-        admin_data = {
-            "username": "admin",
-            "password_hash": new_hash,
-            "full_name": "Puneet Sharma",
-            "phone": "917011303807",
-            "school_id": "admin",
-            "board": "ALL",
-            "subjects": ["Physics", "Maths", "Chemistry", "CS"],
-            "approved": True,
-            "is_admin": True
-        }
-        create_result = sb.table("students").insert(admin_data).execute()
-        if create_result.data:
-            return {"message": "Admin account created successfully with password quarkedadmin", "user": "admin"}
-            
-        return {"message": "No admin user found and failed to create one"}
-    except Exception as e:
-        return {"error": str(e)}
+@app.get("/api/subjects/{exam_board}")
+async def get_subjects(exam_board: str):
+    """Return available subjects and their levels for a board."""
+    subjects = get_subjects_for_board(exam_board)
+    result = {}
+    for subject in subjects:
+        result[subject] = get_levels_for_subject(subject, exam_board)
+    return result
 
 # Serve the widget
 @app.get("/widget/widget.js")
 async def serve_widget():
-    # Construct path dynamically relative to the backend cwd assuming a parallel widget dir
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     widget_path = os.path.join(base_dir, "widget", "widget.js")
     if os.path.exists(widget_path):
