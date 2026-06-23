@@ -1,12 +1,13 @@
-from fastapi import FastAPI, HTTPException, Request, Depends, Response, status, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, Depends, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 import json
 import os
 import uuid
-from datetime import datetime, timedelta
+import asyncio
+from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from dotenv import load_dotenv
@@ -14,7 +15,7 @@ from collections import defaultdict
 from typing import Literal
 
 from prompts import get_system_prompt
-from gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer
+from gemini_client import get_tutor_response_stream, generate_practice_questions, mark_student_answer, client
 from exam_data import SUBJECT_LEVELS, get_levels_for_subject, get_subjects_for_board
 from supabase_client import (
     verify_supabase_jwt, get_student_by_id, create_student,
@@ -67,9 +68,31 @@ def increment_rate_limit(ip: str):
     else:
         entry["count"] += 1
 
+
+async def schedule_90_day_retention_purge():
+    """Runs a background loop every 24 hours to purge question texts older than 90 days."""
+    while True:
+        try:
+            print("Running 90-day data retention purge job...")
+            sb = get_supabase()
+            cutoff = (datetime.utcnow() - timedelta(days=90)).isoformat()
+            
+            # Nullify interactions older than 90 days
+            res = sb.table("interactions").update({"question_text": None}).lt("created_at", cutoff).not_.is_("question_text", "null").execute()
+            if res.data:
+                print(f"Purge complete: Nullified {len(res.data)} interactions older than 90 days.")
+        except Exception as e:
+            print(f"Error in data retention purge job: {e}")
+            
+        await asyncio.sleep(86400)
+
+
 @app.on_event("startup")
 async def startup():
     print(f"Quarked AI Tutor backend started (Schema v2 active | Model: {MODEL})")
+    # Start 90-day retention loop in the background
+    asyncio.create_task(schedule_90_day_retention_purge())
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -97,7 +120,7 @@ class ChatRequest(BaseModel):
     exam_board: str
     level: str
     session_id: str | None = None
-    student_id: str | None = None
+    student_id: str
 
 class GenerateRequest(BaseModel):
     subject: str
@@ -121,16 +144,27 @@ class StudentCreateRequest(BaseModel):
     grade: str | None = None
     board: str
     parent_name: str
-    parent_email: str
+    parent_email: EmailStr
     parent_phone: str | None = None
     is_minor: bool = True
 
-class ConsentRequest(BaseModel):
-    purpose: str
-    status: str
+class ConsentSubmitRequest(BaseModel):
+    student_id: str
+    purposes: list[str]
     granted_by: str
-    verify_method: str = "otp"
-    verify_ref: str | None = None
+    challenge_id: str
+    code: str
+    channel: str = "email"
+
+class ConsentWithdrawRequest(BaseModel):
+    student_id: str
+    purpose: str
+    granted_by: str
+    verify_method: str = "manual"
+
+class OtpRequest(BaseModel):
+    destination: str
+    channel: str = "email"
 
 class AuthRequest(BaseModel):
     username: str
@@ -192,8 +226,8 @@ async def login(request: AuthRequest):
 
 # --- Student Management Endpoints (Staff Only) ---
 
-@app.post("/api/students")
-async def register_student(request: StudentCreateRequest, current_user = Depends(get_current_user)):
+@app.post("/students")
+async def onboard_student(request: StudentCreateRequest, current_user = Depends(get_current_user)):
     managed_by = None
     try:
         uuid.UUID(current_user["id"])
@@ -217,40 +251,63 @@ async def register_student(request: StudentCreateRequest, current_user = Depends
         raise HTTPException(status_code=500, detail="Failed to create student record")
     return result
 
-@app.get("/api/students")
+@app.get("/students")
 async def list_students(current_user = Depends(get_current_user)):
     return get_students_list()
 
-@app.post("/api/students/{student_id}/consent")
-async def add_student_consent(student_id: str, request: ConsentRequest, current_user = Depends(get_current_user)):
-    student = get_student_by_id(student_id)
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
+@app.get("/students/{id}/events")
+async def get_consent_audit_trail(id: str, current_user = Depends(get_current_user)):
+    return get_consent_events(id)
+
+
+# --- Parent Consent Endpoints ---
+
+@app.post("/consent/otp")
+async def send_consent_otp(request: OtpRequest):
+    from otp_service import request_otp
+    try:
+        challenge_id = request_otp(request.destination.strip().lower(), request.channel)
+        return {"challenge_id": challenge_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send OTP code: {str(e)}")
+
+@app.post("/consent")
+async def submit_consent(request: ConsentSubmitRequest):
+    from otp_service import verify_otp
+    
+    # 1. Verify OTP
+    ok, destination = verify_otp(request.challenge_id, request.code)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification code")
         
+    # 2. Write consents rows (DB triggers sync active flag + log consent events)
+    for purpose in request.purposes:
+        consent_data = {
+            "student_id": request.student_id,
+            "purpose": purpose,
+            "status": "granted",
+            "granted_by": request.granted_by.strip(),
+            "verify_method": request.channel,
+            "verify_ref": request.challenge_id
+        }
+        save_consent(consent_data)
+        
+    return {"message": "Consent recorded successfully"}
+
+@app.post("/consent/withdraw")
+async def withdraw_consent(request: ConsentWithdrawRequest):
     consent_data = {
-        "student_id": student_id,
+        "student_id": request.student_id,
         "purpose": request.purpose,
-        "status": request.status,
+        "status": "withdrawn",
         "granted_by": request.granted_by.strip(),
         "verify_method": request.verify_method,
-        "verify_ref": request.verify_ref
+        "withdrawn_at": datetime.utcnow().isoformat()
     }
-    
-    if request.status == "withdrawn":
-        consent_data["withdrawn_at"] = datetime.utcnow().isoformat()
-        
     result = save_consent(consent_data)
     if not result:
-        raise HTTPException(status_code=500, detail="Failed to save consent record")
-    return result
-
-@app.get("/api/students/{student_id}/consents")
-async def get_consents(student_id: str, current_user = Depends(get_current_user)):
-    return get_consents_for_student(student_id)
-
-@app.get("/api/students/{student_id}/events")
-async def get_consent_audit_trail(student_id: str, current_user = Depends(get_current_user)):
-    return get_consent_events(student_id)
+        raise HTTPException(status_code=500, detail="Failed to withdraw consent")
+    return {"message": f"Consent for '{request.purpose}' withdrawn successfully"}
 
 
 # --- Admin Dashboard ---
@@ -259,156 +316,112 @@ async def admin_dashboard(current_user = Depends(get_current_user)):
     return get_admin_dashboard_data()
 
 
-# --- Chat & AI Endpoints ---
+# --- Tutoring Chat Endpoint (Exact compliant flow) ---
 
-async def classify_and_log_interaction(
-    session_id: str, 
-    student_id: str, 
-    model: str, 
-    question_text: str, 
-    response_text: str, 
-    subject: str, 
-    exam_board: str, 
-    level: str
-):
-    """Background task to run a fast classification of the exchange and log the billing/interaction."""
-    try:
-        from gemini_client import client
-        
-        classification_prompt = f"""You are an educational analytics classifier. Analyze this tutor-student exchange.
-        
-        STUDENT QUESTION: {question_text}
-        TUTOR RESPONSE: {response_text}
-        
-        Identify:
-        - Topic (e.g., 'Quadratic equations', 'Linear momentum', 'Photosynthesis')
-        - Difficulty of the question ('easy', 'medium', 'hard')
-        - Resolved: whether the tutor successfully resolved the student's doubt or if the student's doubt is fully answered (true/false)
-        
-        Respond ONLY with a JSON object matching this schema:
-        {{
-            "topic": "string",
-            "difficulty": "easy" | "medium" | "hard",
-            "resolved": true | false
-        }}
-        """
-        
-        class ClassificationResult(BaseModel):
-            topic: str
-            difficulty: Literal["easy", "medium", "hard"]
-            resolved: bool
+class AskResult(BaseModel):
+    answer: str
+    subject: str
+    topic: str
+    difficulty: Literal["easy", "medium", "hard"]
+    resolved: bool
 
-        input_tokens = (2500 + len(question_text) + len(response_text)) // 4
-        output_tokens = len(response_text) // 4
-
-        try:
-            resp = client.models.generate_content(
-                model=model,
-                contents=classification_prompt,
-                config={'response_mime_type': 'application/json', 'response_schema': ClassificationResult}
-            )
-            result = ClassificationResult.model_validate_json(resp.text)
-            topic = result.topic
-            difficulty = result.difficulty
-            resolved = result.resolved
-        except Exception as ex:
-            print(f"Warning: Gemini classification failed: {ex}. Falling back to default values.")
-            topic = "General Chat"
-            difficulty = "medium"
-            resolved = True
-            
-        budget_guard.log_interaction(
-            session_id=session_id,
-            student_id=student_id,
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            subject=subject,
-            topic=topic,
-            difficulty=difficulty,
-            resolved=resolved,
-            question_text=question_text
-        )
-    except Exception as e:
-        print(f"Error in classify_and_log_interaction background task: {e}")
-
-
-@app.post("/api/chat")
-async def chat(request: ChatRequest, req: Request, background_tasks: BackgroundTasks):
-    current_message = request.messages[-1].content
-
-    # 1. Gating, Consent, & Budget Verification
-    if request.student_id:
-        # Layer 1: Consent Gate
-        budget_guard.require_consent(request.student_id, "tutoring")
-        
-        # Student Daily Cap Check
-        budget_guard.check_student_daily_cap(request.student_id)
-        
-        # Layer 2: Budget Gate (pre-check with estimated input size)
-        est_input = len(current_message) // 4
-        budget_guard.check_budget(est_input)
-    else:
-        # Rate limit unauthenticated (public widget) users
-        client_ip = req.headers.get("x-forwarded-for", req.client.host).split(",")[0].strip()
-        if not check_rate_limit(client_ip):
-            raise HTTPException(
-                status_code=429,
-                detail="You've used your 5 free questions for today! Please register at the portal."
-            )
-        increment_rate_limit(client_ip)
-
-    # 2. History Cost Optimization (slice to last 10 messages)
+@app.post("/ask")
+async def ask(request: ChatRequest):
+    from google.genai import types
+    
+    # Step 1: require_consent(student_id, "tutoring") -> 403 if not granted
+    budget_guard.require_consent(request.student_id, "tutoring")
+    
+    # Step 2: check_student_daily_cap(student_id)
+    budget_guard.check_student_daily_cap(request.student_id)
+    
+    # Cost control: cap chat history to the last 8-10 turns (approx 16 messages)
     history_msgs = request.messages[:-1]
-    if len(history_msgs) > 10:
-        history_msgs = history_msgs[-10:]
-    history = [{"role": m.role, "content": m.content} for m in history_msgs]
-
+    if len(history_msgs) > 16:
+        history_msgs = history_msgs[-16:]
+        
+    # Build contents for counting and generating
     system_prompt = get_system_prompt(request.subject, request.exam_board, request.level)
+    
+    contents = []
+    for m in history_msgs:
+        role = 'user' if m.role == 'user' else 'model'
+        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=m.content)]))
+        
+    current_message = request.messages[-1].content
+    contents.append(types.Content(role='user', parts=[types.Part.from_text(text=current_message)]))
+    
+    # Step 3: Count input tokens with the GenAI SDK
+    try:
+        token_resp = client.models.count_tokens(
+            model=MODEL,
+            contents=contents
+        )
+        # Add system prompt token overhead approximation (2500 tokens)
+        estimated_input_tokens = token_resp.total_tokens + 2500
+    except Exception as e:
+        print(f"Error counting tokens: {e}")
+        estimated_input_tokens = (2500 + len(current_message) + sum(len(m.content) for m in history_msgs)) // 4
 
-    # 3. Create or Validate Session (if student is active)
+    # Check monthly budget -> 429 if over cap
+    budget_guard.check_budget(estimated_input_tokens)
+    
+    # Step 4: Call Gemini with max_output_tokens from config
+    # Step 6: Return answer AND structured tags in one single JSON response
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        temperature=0.3,
+        max_output_tokens=budget_guard.MAX_OUTPUT_TOKENS,
+        response_mime_type="application/json",
+        response_schema=AskResult
+    )
+    
+    try:
+        resp = client.models.generate_content(
+            model=MODEL,
+            contents=contents,
+            config=config
+        )
+        
+        # Step 5: Read real usage_metadata
+        input_tokens = resp.usage_metadata.prompt_token_count
+        output_tokens = resp.usage_metadata.candidates_token_count
+        
+        # Parse JSON output
+        result = AskResult.model_validate_json(resp.text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gemini API execution failed: {str(e)}")
+        
+    # Step 7: log_interaction(...)
     session_id = request.session_id
-    if request.student_id:
-        if not session_id:
-            session_id = str(uuid.uuid4())
-        try:
-            sb = get_supabase()
-            sess_check = sb.table('sessions').select('id').eq('id', session_id).execute()
-            if not sess_check.data:
-                create_session(request.student_id, MODEL)
-        except Exception:
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        
+    try:
+        sb = get_supabase()
+        sess_check = sb.table('sessions').select('id').eq('id', session_id).execute()
+        if not sess_check.data:
             create_session(request.student_id, MODEL)
-
-    async def generate():
-        try:
-            latest_image = request.messages[-1].image
-            stream = get_tutor_response_stream(
-                current_message, history, system_prompt, 
-                request.subject, request.exam_board, request.level, 
-                latest_image
-            )
-            
-            full_response = ""
-            for chunk in stream:
-                full_response += chunk
-                yield f"data: {json.dumps({'text': chunk})}\n\n"
-                
-            # Log the exchange in the background if it was an active student
-            if request.student_id and session_id:
-                background_tasks.add_task(
-                    classify_and_log_interaction,
-                    session_id, request.student_id, MODEL, current_message, full_response,
-                    request.subject, request.exam_board, request.level
-                )
-                
-            yield f"data: {json.dumps({'done': True})}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-            yield f"data: {json.dumps({'done': True})}\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    except Exception:
+        create_session(request.student_id, MODEL)
+        
+    budget_guard.log_interaction(
+        session_id=session_id,
+        student_id=request.student_id,
+        model=MODEL,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        subject=request.subject,
+        topic=result.topic,
+        difficulty=result.difficulty,
+        resolved=result.resolved,
+        question_text=current_message
+    )
+    
+    return result.model_dump()
 
 
+# --- Practice Generation & Mark Endpoints (Updated) ---
 @app.post("/api/generate")
 async def generate_questions(request: GenerateRequest, current_user = Depends(get_current_user)):
     try:
@@ -420,7 +433,7 @@ async def generate_questions(request: GenerateRequest, current_user = Depends(ge
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/mark")
-async def mark_answer(request: MarkRequest, background_tasks: BackgroundTasks):
+async def mark_answer(request: MarkRequest):
     try:
         result = mark_student_answer(
             request.question, request.mark_scheme, request.student_answer, request.subject, request.exam_board
@@ -437,10 +450,17 @@ async def mark_answer(request: MarkRequest, background_tasks: BackgroundTasks):
             question_desc = f"Practice Question: {request.question}\nStudent Answer: {request.student_answer}"
             feedback_desc = f"Marks: {result.marks_awarded}/{result.marks_available}\nFeedback: {result.feedback}"
             
-            background_tasks.add_task(
-                classify_and_log_interaction,
-                session_id, request.student_id, MODEL, question_desc, feedback_desc,
-                request.subject, request.exam_board, request.level
+            budget_guard.log_interaction(
+                session_id=session_id,
+                student_id=request.student_id,
+                model=MODEL,
+                input_tokens=100,
+                output_tokens=100,
+                subject=request.subject,
+                topic=request.topic,
+                difficulty="medium",
+                resolved=True,
+                question_text=question_desc
             )
             
         return result.model_dump()
@@ -454,7 +474,6 @@ async def get_progress(student_id: str, current_user = Depends(get_current_user)
 
 @app.get("/api/subjects/{exam_board}")
 async def get_subjects(exam_board: str):
-    """Return available subjects and their levels for a board."""
     subjects = get_subjects_for_board(exam_board)
     result = {}
     for subject in subjects:

@@ -7,20 +7,32 @@ from supabase import create_client, Client
 from cryptography.fernet import Fernet
 
 # ----------------------------------------------------------------------
-# Config (override via environment variables)
+# Fail-fast config
 # ----------------------------------------------------------------------
-# Current model in use
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+def _require(name: str) -> str:
+    v = os.getenv(name)
+    if not v:
+        raise RuntimeError(f"{name} is required but missing from environment variables.")
+    return v
+
+# All required variables fail-fast on startup
+SUPABASE_URL         = _require("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = _require("SUPABASE_SERVICE_KEY")
+QUESTION_ENC_KEY     = _require("QUESTION_ENC_KEY")
+
+# Model Constraint: strictly use gemini-2.5-flash
+MODEL = "gemini-2.5-flash"
 
 # Live per-1M-token prices (USD) as of June 2026.
-# Retired models like 1.5 and 2.0 Flash are excluded.
+# gemini-1.5-flash and gemini-2.0-flash are retired.
+# gemini-3.5-flash is too expensive for routine use.
 PRICES = {
     "gemini-2.5-flash-lite": {"in": 0.10, "out": 0.40},
     "gemini-2.5-flash":      {"in": 0.30, "out": 2.50},
     "gemini-3.5-flash":      {"in": 1.50, "out": 9.00},
 }
 
-# The monthly limit: rupees you are willing to pay per month.
+# The hard cap. INR to pay per month.
 MONTHLY_BUDGET_INR = float(os.getenv("MONTHLY_BUDGET_INR", "5000"))
 USD_INR_RATE       = float(os.getenv("USD_INR_RATE", "86"))       # Google billing rate
 GST_MULTIPLIER     = float(os.getenv("GST_MULTIPLIER", "1.18"))   # 18% India GST
@@ -35,46 +47,28 @@ PER_STUDENT_DAILY_REQUEST_CAP = int(os.getenv("PER_STUDENT_DAILY_REQUEST_CAP", "
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1024"))
 
 # Fernet encryption key setup
-_fernet: Fernet | None = None
-
-def _fk() -> Fernet:
-    global _fernet
-    if _fernet is None:
-        key = os.getenv("QUESTION_ENC_KEY") or os.getenv("CHAT_ENCRYPTION_KEY")
-        if not key:
-            # Fallback for dev environments so startup doesn't crash
-            key = Fernet.generate_key().decode()
-            print("WARNING: QUESTION_ENC_KEY / CHAT_ENCRYPTION_KEY not set. Using temporary key.")
-        _fernet = Fernet(key.encode())
-    return _fernet
+_fernet = Fernet(QUESTION_ENC_KEY.encode())
 
 def encrypt_text(plaintext: str | None) -> str | None:
     """Encrypt raw question text before database insertion. Returns base64 cipher."""
     if not plaintext:
         return None
-    return _fk().encrypt(plaintext.encode()).decode()
+    return _fernet.encrypt(plaintext.encode()).decode()
 
 def decrypt_text(ciphertext: str | None) -> str | None:
     """Decrypt ciphertext on retrieval. Returns None if already purged."""
     if not ciphertext:
         return None
     try:
-        return _fk().decrypt(ciphertext.encode()).decode()
+        return _fernet.decrypt(ciphertext.encode()).decode()
     except Exception as e:
         print(f"Error decrypting question: {e}")
         return "[Decryption Failed]"
 
 # Supabase Client setup using service role key
-_sb: Client | None = None
+_sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 def sb() -> Client:
-    global _sb
-    if _sb is None:
-        url = os.environ.get("SUPABASE_URL", "")
-        key = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY", "")
-        if not url or not key:
-            print("WARNING: Supabase URL or Key not set in environment")
-        _sb = create_client(url, key)
     return _sb
 
 # ----------------------------------------------------------------------
@@ -83,8 +77,7 @@ def sb() -> Client:
 def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
     p = PRICES.get(model)
     if not p:
-        # Fallback to gemini-3.5-flash if model name is unrecognized
-        p = PRICES["gemini-3.5-flash"]
+        raise ValueError(f"Unknown / unpriced model: {model}")
     return (input_tokens / 1e6 * p["in"]) + (output_tokens / 1e6 * p["out"])
 
 def month_spent_usd() -> float:
@@ -132,6 +125,23 @@ def require_consent(student_id: str, purpose: str = "tutoring") -> None:
         print(f"Error checking consent gate: {e}")
         raise HTTPException(status_code=500, detail="Failed to verify student consent status.")
 
+def is_analytics_consented(student_id: str) -> bool:
+    """Check if the student has granted consent for weak_topic_analytics."""
+    try:
+        res = (
+            sb().table("consents")
+            .select("status")
+            .eq("student_id", student_id)
+            .eq("purpose", "weak_topic_analytics")
+            .eq("status", "granted")
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception as e:
+        print(f"Error checking weak_topic_analytics consent: {e}")
+        return False
+
 # ----------------------------------------------------------------------
 # Safety Layer 2: Budget Gating
 # ----------------------------------------------------------------------
@@ -178,7 +188,7 @@ def check_student_daily_cap(student_id: str) -> None:
             .select("id", count="exact")
             .eq("student_id", student_id)
             .gte("created_at", today)
-            .limit(1)  # Fetch 1 row, but get full count in metadata (highly optimized)
+            .limit(1)
             .execute()
         )
         if (res.count or 0) >= PER_STUDENT_DAILY_REQUEST_CAP:
@@ -196,10 +206,14 @@ def check_student_daily_cap(student_id: str) -> None:
 # ----------------------------------------------------------------------
 def log_interaction(*, session_id, student_id, model, input_tokens, output_tokens,
                     subject=None, topic=None, difficulty=None, resolved=None,
-                    question_text=None) -> None:
-    """Encrypts question text and writes the turn logs to interactions table."""
+                    question_text=None) -> dict | None:
+    """Encrypts question text ONLY if analytics consent is granted, then logs to DB."""
     try:
-        sb().table("interactions").insert({
+        db_question_text = None
+        if question_text and is_analytics_consented(student_id):
+            db_question_text = encrypt_text(question_text)
+            
+        row = sb().table("interactions").insert({
             "session_id": session_id,
             "student_id": student_id,
             "model": model,
@@ -210,7 +224,9 @@ def log_interaction(*, session_id, student_id, model, input_tokens, output_token
             "topic": topic,
             "difficulty": difficulty,
             "resolved": resolved,
-            "question_text": encrypt_text(question_text),
+            "question_text": db_question_text,
         }).execute()
+        return row.data[0] if row.data else None
     except Exception as e:
         print(f"Error logging interaction: {e}")
+        return None

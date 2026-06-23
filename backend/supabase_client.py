@@ -1,40 +1,26 @@
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
-from cryptography.fernet import Fernet
 
 load_dotenv()
 
-# Initialize encryption key
-ENCRYPTION_KEY = os.environ.get("CHAT_ENCRYPTION_KEY", "")
-if not ENCRYPTION_KEY:
-    # Fallback key generated for local development so it doesn't crash on start
-    ENCRYPTION_KEY = Fernet.generate_key().decode()
-    print("WARNING: CHAT_ENCRYPTION_KEY not set. Using temporary generated key.")
+# ----------------------------------------------------------------------
+# Fail-fast config
+# ----------------------------------------------------------------------
+def _require(name: str) -> str:
+    v = os.getenv(name)
+    if not v:
+        raise RuntimeError(f"{name} is required but missing from environment variables.")
+    return v
 
-fernet = Fernet(ENCRYPTION_KEY.encode())
+SUPABASE_URL         = _require("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = _require("SUPABASE_SERVICE_KEY")
 
-def encrypt_text(plain_text: str) -> str:
-    if not plain_text:
-        return plain_text
-    return fernet.encrypt(plain_text.encode()).decode()
-
-def decrypt_text(cipher_text: str) -> str:
-    if not cipher_text:
-        return cipher_text
-    try:
-        return fernet.decrypt(cipher_text.encode()).decode()
-    except Exception as e:
-        print(f"Error decrypting text: {e}")
-        return "[Decryption Failed]"
+_sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 def get_supabase() -> Client:
     """Initialize and return a Supabase client using the service_role key to bypass RLS."""
-    url = os.environ.get("SUPABASE_URL", "")
-    key = os.environ.get("SUPABASE_KEY", "")  # This should be the service_role key in prod
-    if not url or not key:
-        print("WARNING: Supabase URL or Key not found in environment")
-    return create_client(url, key)
+    return _sb
 
 def verify_supabase_jwt(jwt_token: str):
     """Verify a Supabase Auth JWT token and return the user object."""
@@ -81,7 +67,7 @@ def get_students_list():
         return []
 
 def save_consent(consent_data: dict):
-    """Save or update parental consent status."""
+    """Save or update parental consent status. Implements upsert."""
     try:
         supabase = get_supabase()
         response = supabase.table('consents').upsert(
@@ -126,29 +112,12 @@ def create_session(student_id: str, model: str):
         print(f"Error creating session: {e}")
         return None
 
-def log_interaction(interaction_data: dict):
-    """Log a single-turn chat interaction (with encrypted question text)."""
-    try:
-        supabase = get_supabase()
-        # Encrypt the question text before saving to database
-        if 'question_text' in interaction_data:
-            interaction_data['question_text'] = encrypt_text(interaction_data['question_text'])
-            
-        response = supabase.table('interactions').insert(interaction_data).execute()
-        return response.data[0] if response.data else None
-    except Exception as e:
-        print(f"Error logging interaction: {e}")
-        return None
-
 def get_admin_dashboard_data():
     """Fetch stats and data for the staff admin dashboard."""
     try:
         supabase = get_supabase()
-        # Get students
         students = supabase.table('students').select('*').execute()
-        # Get latest interactions
         interactions = supabase.table('interactions').select('id, student_id, created_at, subject, topic, cost_usd').order('created_at', desc=True).limit(100).execute()
-        # Get monthly spend aggregation
         spend = supabase.table('monthly_spend_usd').select('*').execute()
         
         return {
