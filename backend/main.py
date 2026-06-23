@@ -413,7 +413,24 @@ async def reset_admin_password(secret: str):
         result = sb.table("students").update({"password_hash": new_hash}).eq("username", "admin").execute()
         if result.data:
             return {"message": "Admin password reset to quarkedadmin", "user": result.data[0].get("username")}
-        return {"message": "No admin user found"}
+        
+        # If admin not found, create it!
+        admin_data = {
+            "username": "admin",
+            "password_hash": new_hash,
+            "full_name": "Puneet Sharma",
+            "phone": "917011303807",
+            "school_id": "admin",
+            "board": "ALL",
+            "subjects": ["Physics", "Maths", "Chemistry", "CS"],
+            "approved": True,
+            "is_admin": True
+        }
+        create_result = sb.table("students").insert(admin_data).execute()
+        if create_result.data:
+            return {"message": "Admin account created successfully with password quarkedadmin", "user": "admin"}
+            
+        return {"message": "No admin user found and failed to create one"}
     except Exception as e:
         return {"error": str(e)}
 
