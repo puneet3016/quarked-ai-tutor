@@ -264,10 +264,12 @@ async def get_consent_audit_trail(id: str, current_user = Depends(get_current_us
 
 @app.post("/consent/otp")
 async def send_consent_otp(request: OtpRequest):
-    from otp_service import request_otp
+    from otp_service import request_otp, OtpCooldownError
     try:
         challenge_id = request_otp(request.destination.strip().lower(), request.channel)
         return {"challenge_id": challenge_id}
+    except OtpCooldownError as e:
+        raise HTTPException(status_code=429, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send OTP code: {str(e)}")
 
@@ -425,16 +427,24 @@ async def ask(request: ChatRequest):
 @app.post("/api/generate")
 async def generate_questions(request: GenerateRequest, current_user = Depends(get_current_user)):
     try:
+        # Enforce monthly budget check for practice question generation (estimated 200 tokens)
+        budget_guard.check_budget(estimated_input_tokens=200)
+        
         qs = generate_practice_questions(
             request.subject, request.topic, request.exam_board, request.level, request.num_questions
         )
         return qs.model_dump()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/mark")
 async def mark_answer(request: MarkRequest):
     try:
+        # Enforce monthly budget check for practice marking (estimated 1000 tokens)
+        budget_guard.check_budget(estimated_input_tokens=1000)
+        
         result = mark_student_answer(
             request.question, request.mark_scheme, request.student_answer, request.subject, request.exam_board
         )

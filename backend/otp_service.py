@@ -84,11 +84,27 @@ def get_sender(channel: str) -> OtpSender:
     return _SENDERS[channel]()
 
 
+class OtpCooldownError(Exception):
+    """Raised when an OTP is requested too quickly for the same destination."""
+    pass
+
 # ----------------------------------------------------------------------
 # Public API
 # ----------------------------------------------------------------------
 def request_otp(destination: str, channel: str = "email") -> str:
     """Generate, store (hashed), and send a code. Returns the challenge_id."""
+    # Enforce 60-second cooldown per destination to prevent inbox spamming
+    cooldown_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+    try:
+        recent = sb().table("otp_challenges").select("created_at").eq("destination", destination).gte("created_at", cooldown_cutoff).limit(1).execute()
+        if recent.data:
+            raise OtpCooldownError("Please wait 60 seconds before requesting another verification code.")
+    except OtpCooldownError:
+        raise
+    except Exception as e:
+        # Log but don't fail the request if it's a temporary DB query issue
+        print(f"Error checking OTP cooldown: {e}")
+
     code = _gen_code()
     expires = datetime.now(timezone.utc) + timedelta(seconds=TTL_SECONDS)
     row = sb().table("otp_challenges").insert({
