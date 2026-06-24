@@ -25,7 +25,10 @@ _sb: Client | None = None
 def sb() -> Client:
     global _sb
     if _sb is None:
-        _sb = create_client(_require("SUPABASE_URL"), _require("SUPABASE_SERVICE_KEY"))
+        key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
+        if not key:
+            raise RuntimeError("SUPABASE_SERVICE_KEY or SUPABASE_KEY is required but missing from environment.")
+        _sb = create_client(_require("SUPABASE_URL"), key)
     return _sb
 
 
