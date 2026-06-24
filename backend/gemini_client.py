@@ -10,7 +10,7 @@ try:
     client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
 except Exception as e:
     print(f"Warning: Gemini client initialization failed: {e}")
-from budget_guard import MODEL
+from budget_guard import MODEL, MAX_OUTPUT_TOKENS
 
 import base64
 import re
@@ -179,7 +179,7 @@ Mix different mark values. Include at least one calculation and one explanation.
     response = client.models.generate_content(
         model=MODEL,
         contents=prompt,
-        config={'response_mime_type': 'application/json', 'response_schema': QuestionSet},
+        config={'response_mime_type': 'application/json', 'response_schema': QuestionSet, 'max_output_tokens': MAX_OUTPUT_TOKENS},
     )
     return QuestionSet.model_validate_json(response.text)
 
@@ -209,6 +209,6 @@ Rules:
     response = client.models.generate_content(
         model=MODEL,
         contents=prompt,
-        config={'response_mime_type': 'application/json', 'response_schema': MarkResult},
+        config={'response_mime_type': 'application/json', 'response_schema': MarkResult, 'max_output_tokens': MAX_OUTPUT_TOKENS},
     )
     return MarkResult.model_validate_json(response.text)

@@ -33,7 +33,14 @@ security = HTTPBearer()
 
 # Password verification for compatibility admin login
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-SECRET_KEY = os.environ.get("JWT_SECRET", "super-secret-default-key-please-change-in-prod")
+def _require(name: str) -> str:
+    v = os.getenv(name)
+    if not v:
+        raise RuntimeError(f"{name} is required but missing from environment variables.")
+    return v
+
+SECRET_KEY = _require("SECRET_KEY")
+SERVER_API_KEY = _require("SERVER_API_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
@@ -171,18 +178,21 @@ class AuthRequest(BaseModel):
     password: str
 
 
-# --- Auth Middleware (Staff Only) ---
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Dependency that verifies tutor/staff authentication using either local Admin JWT or Supabase JWT."""
+    """Dependency that verifies tutor/staff authentication using either SERVER_API_KEY, local Admin JWT, or Supabase JWT."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
     
+    token = credentials.credentials
+    if token == SERVER_API_KEY:
+        return {"id": "server", "username": "server", "is_admin": True}
+    
     # 1. Try local JWT decode (compatibility for admin login)
     try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username == "admin":
             return {"id": "admin", "username": "admin", "is_admin": True}
@@ -190,7 +200,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         pass
 
     # 2. Fallback to Supabase Auth JWT verification
-    user = verify_supabase_jwt(credentials.credentials)
+    user = verify_supabase_jwt(token)
     if user is None:
         raise credentials_exception
     return {"id": user.id, "email": user.email, "username": user.email, "is_admin": True}
@@ -198,6 +208,159 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 async def get_current_admin(current_user: dict = Depends(get_current_user)):
     """In beta, any authenticated staff member is authorized."""
     return current_user
+
+
+def _hash_code(code: str) -> str:
+    import hmac
+    import hashlib
+    pepper = os.getenv("OTP_PEPPER")
+    if not pepper:
+        raise RuntimeError("OTP_PEPPER is required but missing from environment.")
+    return hmac.new(pepper.encode(), code.encode(), hashlib.sha256).hexdigest()
+
+
+async def get_student_from_cookie(request: Request, response: Response):
+    """
+    Dependency to authenticate the student from the httpOnly secure cookie.
+    Validates token signature, expiration, jti, and live database consent check.
+    Implements silent auto-renewal if the token is within 30 days of expiry.
+    """
+    token = request.cookies.get("student_token")
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing student token cookie"
+        )
+        
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        student_id = payload.get("sub")
+        jti = payload.get("jti")
+        token_ver = payload.get("version", 1)
+        exp = payload.get("exp")
+        
+        if not student_id or not jti or not exp:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token claims"
+            )
+            
+        # Re-check live consent status
+        budget_guard.require_consent(str(student_id), "tutoring")
+        
+        # Retrieve student to check token version revocation
+        student = get_student_by_id(str(student_id))
+        if not student:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Student not found"
+            )
+            
+        # Revocation check via version
+        current_ver = student.get("token_version", 1)
+        if token_ver < current_ver:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has been revoked"
+            )
+            
+        # Silent auto-renewal: renew only when within 30 days of expiry
+        # 30 days in seconds = 30 * 24 * 3600 = 2592000
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if exp - now_ts < 2592000:
+            new_jti = str(uuid.uuid4())
+            new_payload = {
+                "sub": student_id,
+                "iat": now_ts,
+                "exp": now_ts + (90 * 24 * 3600),
+                "jti": new_jti,
+                "version": current_ver
+            }
+            new_token = jwt.encode(new_payload, SECRET_KEY, algorithm=ALGORITHM)
+            response.set_cookie(
+                key="student_token",
+                value=new_token,
+                httponly=True,
+                secure=True,
+                samesite="none",
+                domain=".quarked.tech",
+                max_age=90 * 24 * 3600
+            )
+            
+        return student
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid student token: {str(e)}"
+        )
+
+
+async def get_any_auth(request: Request, response: Response, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Allows staff (Supabase JWT/Admin JWT/Server API Key) or students (signed student JWT)."""
+    # 1. Try staff auth
+    try:
+        user = await get_current_user(credentials)
+        if user:
+            return {"type": "staff", "user": user}
+    except Exception:
+        pass
+        
+    # 2. Try student token cookie
+    try:
+        student = await get_student_from_cookie(request, response)
+        if student:
+            return {"type": "student", "student": student}
+    except Exception:
+        pass
+        
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Unauthorized access",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def get_withdrawal_auth(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """
+    Verifies that the caller is authorized to withdraw consent.
+    Accepts:
+    1. A valid staff credential (get_current_user).
+    2. A token passed in query parameter or request body signed with SECRET_KEY.
+    """
+    # 1. Try staff auth
+    try:
+        user = await get_current_user(credentials)
+        if user:
+            return {"type": "staff", "user": user}
+    except Exception:
+        pass
+        
+    # 2. Try signed withdraw token from query parameters or request body
+    token = request.query_params.get("token")
+    if not token:
+        try:
+            body = await request.json()
+            token = body.get("token")
+        except Exception:
+            pass
+            
+    if token:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            action = payload.get("action")
+            student_id = payload.get("sub")
+            if action == "withdraw" and student_id:
+                return {"type": "parent", "student_id": student_id}
+        except Exception:
+            pass
+            
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Unauthorized to withdraw consent"
+    )
 
 
 # --- Compatibility Auth Endpoint ---
@@ -275,7 +438,7 @@ async def send_consent_otp(request: OtpRequest):
 
 @app.post("/consent")
 async def submit_consent(request: ConsentSubmitRequest):
-    from otp_service import verify_otp
+    from otp_service import verify_otp, send_withdrawal_email
     
     # 1. Verify OTP
     ok, destination = verify_otp(request.challenge_id, request.code)
@@ -294,10 +457,103 @@ async def submit_consent(request: ConsentSubmitRequest):
         }
         save_consent(consent_data)
         
-    return {"message": "Consent recorded successfully"}
+    # 3. Generate signed withdrawal token & email withdrawal link to the parent
+    try:
+        withdraw_payload = {
+            "sub": request.student_id,
+            "action": "withdraw",
+            "purposes": request.purposes
+        }
+        # Parents have no logins, so we sign a JWT without expiration to allow manual withdrawal
+        withdraw_token = jwt.encode(withdraw_payload, SECRET_KEY, algorithm=ALGORITHM)
+        withdraw_link = f"https://app.quarked.tech/withdraw-consent?token={withdraw_token}"
+        
+        student = get_student_by_id(request.student_id)
+        student_name = student["name"] if student else "your student"
+        send_withdrawal_email(destination, student_name, withdraw_link)
+    except Exception as e:
+        print(f"Error sending withdrawal email: {e}")
+        
+    # 4. Generate short-lived exchange code
+    raw_exchange_code = str(uuid.uuid4())
+    hashed_code = _hash_code(raw_exchange_code)
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    
+    try:
+        sb = get_supabase()
+        sb.table("exchange_codes").insert({
+            "student_id": request.student_id,
+            "code_hash": hashed_code,
+            "expires_at": expires_at
+        }).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to record exchange code: {e}")
+        
+    return {"message": "Consent recorded successfully", "exchange_code": raw_exchange_code}
+
+
+class ExchangeRequest(BaseModel):
+    exchange_code: str
+
+
+@app.post("/session/exchange")
+async def session_exchange(request: ExchangeRequest, response: Response):
+    sb = get_supabase()
+    hashed = _hash_code(request.exchange_code)
+    
+    # Query database for unconsumed, unexpired exchange code
+    now_str = datetime.now(timezone.utc).isoformat()
+    res = sb.table("exchange_codes").select("*").eq("code_hash", hashed).is_("consumed_at", "null").execute()
+    
+    if not res.data:
+        raise HTTPException(status_code=400, detail="Invalid or already used exchange code")
+        
+    code_record = res.data[0]
+    if datetime.fromisoformat(code_record["expires_at"]) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Exchange code has expired")
+        
+    student_id = code_record["student_id"]
+    
+    # Mark as consumed
+    sb.table("exchange_codes").update({"consumed_at": now_str}).eq("id", code_record["id"]).execute()
+    
+    # Fetch student to get current token version
+    student = get_student_by_id(student_id)
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+        
+    current_ver = student.get("token_version", 1)
+    
+    # Mint a fresh 90-day student token cookie
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    new_payload = {
+        "sub": student_id,
+        "iat": now_ts,
+        "exp": now_ts + (90 * 24 * 3600),
+        "jti": str(uuid.uuid4()),
+        "version": current_ver
+    }
+    student_token = jwt.encode(new_payload, SECRET_KEY, algorithm=ALGORITHM)
+    
+    response.set_cookie(
+        key="student_token",
+        value=student_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        domain=".quarked.tech",
+        max_age=90 * 24 * 3600
+    )
+    
+    return {"message": "Session established successfully"}
+
 
 @app.post("/consent/withdraw")
-async def withdraw_consent(request: ConsentWithdrawRequest):
+async def withdraw_consent(request: ConsentWithdrawRequest, auth = Depends(get_withdrawal_auth)):
+    if auth["type"] == "parent":
+        if str(request.student_id) != str(auth["student_id"]):
+            raise HTTPException(status_code=403, detail="student_id mismatch in withdrawal token")
+            
     consent_data = {
         "student_id": request.student_id,
         "purpose": request.purpose,
@@ -309,6 +565,17 @@ async def withdraw_consent(request: ConsentWithdrawRequest):
     result = save_consent(consent_data)
     if not result:
         raise HTTPException(status_code=500, detail="Failed to withdraw consent")
+        
+    # Revocation: increment students.token_version whenever a parent withdraws consent
+    try:
+        sb = get_supabase()
+        student = get_student_by_id(request.student_id)
+        if student:
+            current_ver = student.get("token_version", 1)
+            sb.table("students").update({"token_version": current_ver + 1}).eq("id", request.student_id).execute()
+    except Exception as e:
+        print(f"Error incrementing token version: {e}")
+        
     return {"message": f"Consent for '{request.purpose}' withdrawn successfully"}
 
 
@@ -328,11 +595,12 @@ class AskResult(BaseModel):
     resolved: bool
 
 @app.post("/ask")
-async def ask(request: ChatRequest):
+async def ask(request: ChatRequest, student = Depends(get_student_from_cookie)):
     from google.genai import types
     
-    # Step 1: require_consent(student_id, "tutoring") -> 403 if not granted
-    budget_guard.require_consent(request.student_id, "tutoring")
+    # Verify client-supplied student_id matches token
+    if str(request.student_id) != str(student["id"]):
+        raise HTTPException(status_code=403, detail="student_id mismatch")
     
     # Step 2: check_student_daily_cap(student_id)
     budget_guard.check_student_daily_cap(request.student_id)
@@ -439,8 +707,16 @@ async def generate_questions(request: GenerateRequest, current_user = Depends(ge
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/api/mark")
-async def mark_answer(request: MarkRequest):
+async def mark_answer(request: MarkRequest, student = Depends(get_student_from_cookie)):
+    # Verify student_id in token matches body
+    if request.student_id:
+        if str(request.student_id) != str(student["id"]):
+            raise HTTPException(status_code=403, detail="student_id mismatch")
+    else:
+        request.student_id = str(student["id"])
+
     try:
         # Enforce monthly budget check for practice marking (estimated 1000 tokens)
         budget_guard.check_budget(estimated_input_tokens=1000)
@@ -458,7 +734,6 @@ async def mark_answer(request: MarkRequest):
                 pass
                 
             question_desc = f"Practice Question: {request.question}\nStudent Answer: {request.student_answer}"
-            feedback_desc = f"Marks: {result.marks_awarded}/{result.marks_available}\nFeedback: {result.feedback}"
             
             budget_guard.log_interaction(
                 session_id=session_id,
@@ -483,12 +758,13 @@ async def get_progress(student_id: str, current_user = Depends(get_current_user)
     return {"history": history}
 
 @app.get("/api/subjects/{exam_board}")
-async def get_subjects(exam_board: str):
+async def get_subjects(exam_board: str, auth = Depends(get_any_auth)):
     subjects = get_subjects_for_board(exam_board)
     result = {}
     for subject in subjects:
         result[subject] = get_levels_for_subject(subject, exam_board)
     return result
+
 
 # Serve the widget
 @app.get("/widget/widget.js")

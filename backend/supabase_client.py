@@ -15,10 +15,7 @@ def _require(name: str) -> str:
 
 SUPABASE_URL = _require("SUPABASE_URL")
 
-# Accept either SUPABASE_SERVICE_KEY or SUPABASE_KEY (service role)
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
-if not SUPABASE_SERVICE_KEY:
-    raise RuntimeError("SUPABASE_SERVICE_KEY or SUPABASE_KEY is required but missing from environment variables.")
+SUPABASE_SERVICE_KEY = _require("SUPABASE_SERVICE_KEY")
 
 _sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 

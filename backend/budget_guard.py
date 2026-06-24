@@ -16,13 +16,8 @@ def _require(name: str) -> str:
     return v
 
 # All required variables fail-fast on startup
-SUPABASE_URL = _require("SUPABASE_URL")
-
-# Accept either SUPABASE_SERVICE_KEY or SUPABASE_KEY (service role)
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
-if not SUPABASE_SERVICE_KEY:
-    raise RuntimeError("SUPABASE_SERVICE_KEY or SUPABASE_KEY is required but missing from environment variables.")
-
+SUPABASE_URL         = _require("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = _require("SUPABASE_SERVICE_KEY")
 QUESTION_ENC_KEY     = _require("QUESTION_ENC_KEY")
 
 # Model Constraint: strictly use gemini-2.5-flash

@@ -16,19 +16,17 @@ def _require(name: str) -> str:
     return v
 
 # All required variables fail-fast on startup
-OTP_PEPPER  = _require("OTP_PEPPER")
-TTL_SECONDS = int(os.getenv("OTP_TTL_SECONDS", "600"))
-CODE_DIGITS = 6
+SUPABASE_URL         = _require("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = _require("SUPABASE_SERVICE_KEY")
+OTP_PEPPER           = _require("OTP_PEPPER")
+RESEND_API_KEY       = _require("RESEND_API_KEY")
+OTP_FROM_EMAIL       = _require("OTP_FROM_EMAIL")
+TTL_SECONDS          = int(os.getenv("OTP_TTL_SECONDS", "600"))
+CODE_DIGITS          = 6
 
-_sb: Client | None = None
+_sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 def sb() -> Client:
-    global _sb
-    if _sb is None:
-        key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
-        if not key:
-            raise RuntimeError("SUPABASE_SERVICE_KEY or SUPABASE_KEY is required but missing from environment.")
-        _sb = create_client(_require("SUPABASE_URL"), key)
     return _sb
 
 
@@ -145,3 +143,31 @@ def verify_otp(challenge_id: str, code: str) -> tuple[bool, str | None]:
         {"consumed_at": datetime.now(timezone.utc).isoformat()}
     ).eq("id", challenge_id).execute()
     return True, c["destination"]
+
+
+def send_withdrawal_email(destination: str, student_name: str, link: str) -> None:
+    """Send parental consent withdrawal link using Resend."""
+    api_key = os.getenv("RESEND_API_KEY")
+    sender_email = os.getenv("OTP_FROM_EMAIL")
+    if not api_key or not sender_email:
+        raise RuntimeError("Missing RESEND_API_KEY or OTP_FROM_EMAIL for sending email.")
+        
+    body = (
+        f"Dear Parent,\n\n"
+        f"You have successfully granted consent for {student_name} to use Quarked AI Tutor.\n\n"
+        f"If you wish to withdraw your consent at any time, please click the following link:\n"
+        f"{link}\n\n"
+        f"This link is secure and contains your authorization signature. If you did not authorize this, please contact Puneet Sharma immediately."
+    )
+    r = requests.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "from": sender_email,
+            "to": [destination],
+            "subject": f"Quarked Consent Confirmation for {student_name}",
+            "text": body,
+        },
+        timeout=10,
+    )
+    r.raise_for_status()
