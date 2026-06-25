@@ -455,7 +455,13 @@
         
         try {
             const response = await fetch(`${apiUrl}/api/subjects/${encodeURIComponent(board)}`);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
             const subjects = await response.json();
+            if (!subjects || subjects.detail) {
+                throw new Error(subjects?.detail || 'Invalid subjects response');
+            }
             const levels = subjects[subject] || [];
             
             levelSelect.innerHTML = '';
@@ -490,7 +496,13 @@
         
         try {
             const response = await fetch(`${apiUrl}/api/subjects/${encodeURIComponent(board)}`);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
             const subjects = await response.json();
+            if (!subjects || subjects.detail) {
+                throw new Error(subjects?.detail || 'Invalid subjects response');
+            }
             
             const currentSubject = initialValues.subject || subjectSelect.value;
             subjectSelect.innerHTML = '';
