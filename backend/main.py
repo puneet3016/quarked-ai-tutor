@@ -758,7 +758,7 @@ async def get_progress(student_id: str, current_user = Depends(get_current_user)
     return {"history": history}
 
 @app.get("/api/subjects/{exam_board}")
-async def get_subjects(exam_board: str, auth = Depends(get_any_auth)):
+async def get_subjects(exam_board: str):
     subjects = get_subjects_for_board(exam_board)
     result = {}
     for subject in subjects:
