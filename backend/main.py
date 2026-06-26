@@ -965,7 +965,7 @@ async def get_subjects(exam_board: str):
 # Serve the widget
 @app.get("/widget/widget.js")
 async def serve_widget():
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     widget_path = os.path.join(base_dir, "widget", "widget.js")
     if os.path.exists(widget_path):
         return FileResponse(widget_path, media_type="application/javascript")
@@ -973,7 +973,7 @@ async def serve_widget():
     
 @app.get("/widget/widget-loader.js")
 async def serve_widget_loader():
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     widget_path = os.path.join(base_dir, "widget", "widget-loader.js")
     if os.path.exists(widget_path):
         return FileResponse(widget_path, media_type="application/javascript")

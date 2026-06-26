@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+  <div id="test">
+    what happens to the mass ($m$) since I didn't give you a value for it?
+  </div>
+  <script>
+    renderMathInElement(document.getElementById('test'), {
+      delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '$', right: '$', display: false },
+          { left: '\\\\(', right: '\\\\)', display: false },
+          { left: '\\\\[', right: '\\\\]', display: true }
+      ],
+      throwOnError: false
+    });
+    console.log(document.getElementById('test').innerHTML);
+  </script>
+</body>
+</html>
