@@ -556,7 +556,7 @@ async def session_exchange(request: ExchangeRequest, response: Response):
         max_age=90 * 24 * 3600
     )
     
-    return {"message": "Session established successfully"}
+    return {"message": "Session established successfully", "student_id": student_id}
 
 
 @app.post("/consent/withdraw")
@@ -604,6 +604,19 @@ class AskResult(BaseModel):
     topic: str
     difficulty: Literal["easy", "medium", "hard"]
     resolved: bool
+
+@app.get("/session/me")
+async def session_me(student = Depends(get_student_from_cookie)):
+    """Auth probe for the widget. If the student_token cookie is valid and consent is
+    active, returns the student; otherwise get_student_from_cookie raises 401."""
+    return {
+        "authenticated": True,
+        "student_id": student["id"],
+        "name": student.get("name"),
+        "grade": student.get("grade"),
+        "board": student.get("board"),
+    }
+
 
 @app.post("/ask")
 async def ask(request: ChatRequest, student = Depends(get_student_from_cookie)):
