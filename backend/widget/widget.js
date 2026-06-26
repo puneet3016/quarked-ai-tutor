@@ -598,8 +598,15 @@
         let html = str;
         // Parse markdown links: [Link Text](URL)
         html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
-        // Parse remaining raw URLs that are not part of an existing anchor tag attribute or text
-        html = html.replace(/(?<!href="|src="|">)(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank">$1</a>');
+        // Parse remaining raw URLs that are not part of an existing HTML tag
+        const urlRegex = /(<a[^>]*>[\s\S]*?<\/a>|<img[^>]*>)|(https?:\/\/[^\s<)]+)/g;
+        html = html.replace(urlRegex, (match, tag, url) => {
+            if (tag) {
+                return tag; // Return tag unmodified
+            } else {
+                return `<a href="${url}" target="_blank">${url}</a>`;
+            }
+        });
         // Parse bold: **text**
         html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
         // Parse italic: *text*
@@ -826,15 +833,16 @@
             level: levelSelect.value
         };
 
-        // Add dummy AI message for streaming
-        const aiMsgIndex = chatHistory.length;
-        chatHistory.push({ role: 'assistant', content: '' });
-
         const typingEl = document.createElement('div');
         typingEl.className = 'qk-typing qk-msg qk-msg-ai';
         typingEl.innerHTML = '<div class="qk-typing-dot"></div><div class="qk-typing-dot"></div><div class="qk-typing-dot"></div>';
         messagesEl.appendChild(typingEl);
         scrollToBottom();
+
+        let aiMsgIndex = -1;
+        let streamingDiv = null;
+        let assistantResponseText = '';
+        let hasRemovedTyping = false;
 
         try {
             const response = await fetch(`${API_URL}/api/chat`, {
@@ -849,8 +857,10 @@
                 if (typingEl.parentNode === messagesEl) {
                     messagesEl.removeChild(typingEl);
                 }
-                chatHistory[aiMsgIndex].role = 'system';
-                chatHistory[aiMsgIndex].content = "⚡ You've used your 5 free questions for today!\n\nSign up on our student portal for **unlimited access** to the Quarked AI Tutor:\n\n👉 [Register here](https://app.quarked.tech)\n\nOr WhatsApp Puneet directly: [+91 70113 03807](https://wa.me/917011303807)";
+                chatHistory.push({
+                    role: 'system',
+                    content: "⚡ You've used your 5 free questions for today!\n\nSign up on our student portal for **unlimited access** to the Quarked AI Tutor:\n\n👉 [Register here](https://app.quarked.tech)\n\nOr WhatsApp Puneet directly: [+91 70113 03807](https://wa.me/917011303807)"
+                });
                 localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
                 renderMessages();
                 return;
@@ -867,16 +877,6 @@
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder('utf-8');
-            let assistantResponseText = '';
-
-            // We do NOT remove typingEl here. We will remove it as soon as we get the first chunk or an error.
-
-            // Create target div for streaming
-            const streamingDiv = document.createElement('div');
-            streamingDiv.className = 'qk-msg qk-msg-ai';
-            messagesEl.appendChild(streamingDiv);
-
-            let hasRemovedTyping = false;
             let buffer = '';
 
             while (true) {
@@ -884,6 +884,7 @@
                 if (done) {
                     if (!hasRemovedTyping && typingEl.parentNode === messagesEl) {
                         messagesEl.removeChild(typingEl);
+                        hasRemovedTyping = true;
                     }
                     break;
                 }
@@ -902,44 +903,89 @@
                             const data = JSON.parse(dataStr);
                             if (data.error) {
                                 console.error('Tutor error:', data.error);
-                                if (!hasRemovedTyping && typingEl.parentNode === messagesEl) {
-                                    messagesEl.removeChild(typingEl);
-                                    hasRemovedTyping = true;
-                                }
                                 throw new Error(data.error);
                             } else if (data.text) {
                                 if (!hasRemovedTyping && typingEl.parentNode === messagesEl) {
                                     messagesEl.removeChild(typingEl);
                                     hasRemovedTyping = true;
                                 }
+                                
+                                // Create target div for streaming if it doesn't exist yet
+                                if (!streamingDiv) {
+                                    streamingDiv = document.createElement('div');
+                                    streamingDiv.className = 'qk-msg qk-msg-ai';
+                                    messagesEl.appendChild(streamingDiv);
+                                }
+                                
+                                // Initialize assistant message in history if not already done
+                                if (aiMsgIndex === -1) {
+                                    chatHistory.push({ role: 'assistant', content: '' });
+                                    aiMsgIndex = chatHistory.length - 1;
+                                }
+
                                 assistantResponseText += data.text;
+                                chatHistory[aiMsgIndex].content = assistantResponseText;
                                 streamingDiv.innerHTML = simpleFormatText(assistantResponseText);
                                 scrollToBottom();
                             } else if (data.done) {
-                                chatHistory[aiMsgIndex].content = assistantResponseText;
-                                localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
-                                // Now render with full KaTeX math support
-                                streamingDiv.innerHTML = formatMessageText(assistantResponseText);
-                                requestAnimationFrame(() => {
-                                    triggerKaTeXRender();
-                                    scrollToBottom();
-                                });
+                                if (aiMsgIndex !== -1) {
+                                    chatHistory[aiMsgIndex].content = assistantResponseText;
+                                    localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
+                                    if (streamingDiv) {
+                                        // Now render with full KaTeX math support
+                                        streamingDiv.innerHTML = formatMessageText(assistantResponseText);
+                                    }
+                                    requestAnimationFrame(() => {
+                                        triggerKaTeXRender();
+                                        scrollToBottom();
+                                    });
+                                }
                             }
                         } catch (e) {
                             console.error("Parse error on stream chunk", e);
+                            if (e.message && (e.message.includes('Quota exceeded') || e.message.includes('RESOURCE_EXHAUSTED') || e.message.includes('Tutor error'))) {
+                                throw e;
+                            }
                         }
                     }
                 }
             }
 
+            // If we finished the loop but never initialized the assistant message (e.g. empty stream)
+            if (aiMsgIndex === -1) {
+                throw new Error("Empty response received from Tutor API.");
+            }
+
         } catch (err) {
             console.error("Stream catch block:", err);
-            // Ensure typing animation is removed if fetch failed before starting the stream
+            
+            // Remove typing indicator
             if (typingEl.parentNode === messagesEl) {
                 messagesEl.removeChild(typingEl);
             }
-            chatHistory[aiMsgIndex].role = 'system';
-            chatHistory[aiMsgIndex].content = "Sorry, I had trouble connecting to the Tutor API. Please try asking again.";
+            
+            // Remove streaming div if it was created but the response is empty
+            if (streamingDiv && !assistantResponseText && streamingDiv.parentNode === messagesEl) {
+                messagesEl.removeChild(streamingDiv);
+            }
+
+            // Decide whether to overwrite the assistant message or add a system warning
+            if (aiMsgIndex !== -1 && assistantResponseText) {
+                // We got partial text. Append error message to history as system warning
+                chatHistory.push({
+                    role: 'system',
+                    content: `⚠️ Connection lost mid-stream. (Error: ${err.message})`
+                });
+            } else {
+                // No response text was received at all
+                chatHistory.push({
+                    role: 'system',
+                    content: err.message && (err.message.includes('Quota exceeded') || err.message.includes('RESOURCE_EXHAUSTED'))
+                        ? "⚡ Rate limit or quota exceeded. Please try again later, or sign up for unlimited access."
+                        : `Sorry, I had trouble connecting to the Tutor API. (Error: ${err.message || 'Unknown'})`
+                });
+            }
+            
             localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
             renderMessages();
         } finally {
