@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, Depends, Response, status
+from fastapi import FastAPI, HTTPException, Request, Depends, Response, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -127,7 +127,7 @@ class ChatRequest(BaseModel):
     exam_board: str
     level: str
     session_id: str | None = None
-    student_id: str
+    student_id: str | None = None
 
 class GenerateRequest(BaseModel):
     subject: str
@@ -689,6 +689,202 @@ async def ask(request: ChatRequest, student = Depends(get_student_from_cookie)):
     )
     
     return result.model_dump()
+
+
+async def classify_and_log_interaction(
+    session_id: str, 
+    student_id: str, 
+    model: str, 
+    question_text: str, 
+    response_text: str,
+    subject: str,
+    exam_board: str,
+    level: str
+):
+    try:
+        from google.genai import types
+        # Quick model call to categorize the interaction details
+        classify_prompt = f"""Analyze the tutoring interaction below and classify:
+1. Topic: specific topic/concept being discussed (e.g. Newton's Second Law, Quadratics, Photosynthesis) - max 4 words.
+2. Difficulty: one of "easy", "medium", "hard".
+3. Resolved: boolean (true if student's query is answered/resolved, false otherwise).
+
+Return ONLY a JSON block matching this structure:
+{{
+  "topic": "topic name",
+  "difficulty": "easy/medium/hard",
+  "resolved": true/false
+}}
+
+QUESTION: {question_text}
+RESPONSE: {response_text}
+"""
+        input_tokens = (2500 + len(question_text) + len(response_text)) // 4
+        output_tokens = len(response_text) // 4
+
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=classify_prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
+            )
+            data = json.loads(resp.text)
+            topic = data.get("topic", "General")
+            difficulty = data.get("difficulty", "medium")
+            resolved = data.get("resolved", True)
+        except Exception:
+            topic = "General"
+            difficulty = "medium"
+            resolved = True
+            
+        budget_guard.log_interaction(
+            session_id=session_id,
+            student_id=student_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            subject=subject,
+            topic=topic,
+            difficulty=difficulty,
+            resolved=resolved,
+            question_text=question_text
+        )
+    except Exception as e:
+        print(f"Error in classify_and_log_interaction background task: {e}")
+
+
+@app.post("/api/chat")
+async def chat(request: ChatRequest, req: Request, response: Response, background_tasks: BackgroundTasks):
+    from google.genai import types
+    current_message = request.messages[-1].content
+    latest_image = request.messages[-1].image
+    
+    student_id = None
+    
+    # 1. Attempt to authenticate student via cookie
+    token = req.cookies.get("student_token")
+    if token:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            dec_student_id = payload.get("sub")
+            jti = payload.get("jti")
+            token_ver = payload.get("version", 1)
+            exp = payload.get("exp")
+            
+            if not dec_student_id or not jti or not exp:
+                raise HTTPException(status_code=401, detail="Invalid token claims")
+                
+            # Re-check live consent status
+            budget_guard.require_consent(str(dec_student_id), "tutoring")
+            
+            # Retrieve student to check revocation
+            student = get_student_by_id(str(dec_student_id))
+            if not student:
+                raise HTTPException(status_code=401, detail="Student not found")
+                
+            current_ver = student.get("token_version", 1)
+            if token_ver < current_ver:
+                raise HTTPException(status_code=401, detail="Token has been revoked")
+                
+            # Valid student!
+            student_id = str(dec_student_id)
+            
+            # Silent auto-renewal: renew only when within 30 days of expiry
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            if exp - now_ts < 2592000:
+                new_jti = str(uuid.uuid4())
+                new_payload = {
+                    "sub": student_id,
+                    "iat": now_ts,
+                    "exp": now_ts + (90 * 24 * 3600),
+                    "jti": new_jti,
+                    "version": current_ver
+                }
+                new_token = jwt.encode(new_payload, SECRET_KEY, algorithm=ALGORITHM)
+                response.set_cookie(
+                    key="student_token",
+                    value=new_token,
+                    httponly=True,
+                    secure=True,
+                    samesite="none",
+                    domain=".quarked.tech",
+                    max_age=90 * 24 * 3600
+                )
+        except HTTPException as he:
+            raise he
+        except Exception as e:
+            raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
+            
+    # 2. Check gating, consent, and budget based on auth status
+    if student_id:
+        budget_guard.check_student_daily_cap(student_id)
+        est_input = len(current_message) // 4
+        budget_guard.check_budget(est_input)
+    else:
+        # Rate limit unauthenticated (public guest) users
+        client_ip = req.headers.get("x-forwarded-for", req.client.host).split(",")[0].strip()
+        if not check_rate_limit(client_ip):
+            raise HTTPException(
+                status_code=429,
+                detail="You've used your 5 free questions for today! Please register at the portal."
+            )
+        increment_rate_limit(client_ip)
+        
+        est_input = len(current_message) // 4
+        budget_guard.check_budget(est_input)
+        
+    # 3. History Cost Optimization (slice to last 10 messages)
+    history_msgs = request.messages[:-1]
+    if len(history_msgs) > 10:
+        history_msgs = history_msgs[-10:]
+    history = [{"role": m.role, "content": m.content} for m in history_msgs]
+    
+    system_prompt = get_system_prompt(request.subject, request.exam_board, request.level)
+    
+    # 4. Manage Session for authenticated student
+    session_id = request.session_id
+    if student_id:
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        try:
+            sb = get_supabase()
+            sess_check = sb.table('sessions').select('id').eq('id', session_id).execute()
+            if not sess_check.data:
+                create_session(student_id, MODEL)
+        except Exception:
+            create_session(student_id, MODEL)
+            
+    # 5. Define streaming generator
+    async def generate():
+        try:
+            stream = get_tutor_response_stream(
+                current_message, history, system_prompt, 
+                request.subject, request.exam_board, request.level, 
+                latest_image
+            )
+            
+            full_response = ""
+            for chunk in stream:
+                full_response += chunk
+                yield f"data: {json.dumps({'text': chunk})}\n\n"
+                
+            # Log the exchange in the background if it was an active authenticated student
+            if student_id and session_id:
+                background_tasks.add_task(
+                    classify_and_log_interaction,
+                    session_id, student_id, MODEL, current_message, full_response,
+                    request.subject, request.exam_board, request.level
+                )
+                
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+            
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # --- Practice Generation & Mark Endpoints (Updated) ---
