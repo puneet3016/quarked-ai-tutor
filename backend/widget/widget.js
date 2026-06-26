@@ -2,8 +2,6 @@
     const scriptTag = document.currentScript;
     const API_URL = scriptTag ? scriptTag.getAttribute('data-api-url') : 'http://localhost:8000';
     let chatHistory = JSON.parse(localStorage.getItem('quarked_chat_history') || '[]');
-    // Authenticated-student state (set by initAuth via the httpOnly cookie probe)
-    let authState = { authenticated: false, student_id: null };
 
     // 1. Inject KaTeX dependencies if not already loaded
     if (!document.getElementById('qk-katex-css')) {
@@ -214,6 +212,27 @@
             font-weight: 500;
         }
         .qk-msg.qk-msg-ai a:hover {
+            color: #ffffff;
+        }
+
+        .qk-msg-system {
+            align-self: center;
+            background-color: #1a1a1a;
+            color: #a0a0a0;
+            border: 1px dashed #333333;
+            font-size: 0.85rem;
+            text-align: center;
+            max-width: 90%;
+            border-radius: 8px;
+        }
+        .qk-msg.qk-msg-system strong { color: #f0c674; font-weight: 700; }
+        .qk-msg.qk-msg-system em { font-style: italic; color: #d4a84a; }
+        .qk-msg.qk-msg-system a {
+            color: #f0c674;
+            text-decoration: underline;
+            font-weight: 500;
+        }
+        .qk-msg.qk-msg-system a:hover {
             color: #ffffff;
         }
 
@@ -643,7 +662,7 @@
         messagesEl.innerHTML = '';
         chatHistory.forEach(msg => {
             const div = document.createElement('div');
-            div.className = 'qk-msg ' + (msg.role === 'user' ? 'qk-msg-user' : 'qk-msg-ai');
+            div.className = 'qk-msg ' + (msg.role === 'user' ? 'qk-msg-user' : msg.role === 'system' ? 'qk-msg-system' : 'qk-msg-ai');
             div.innerHTML = formatMessageText(msg.content);
             messagesEl.appendChild(div);
         });
@@ -777,7 +796,7 @@
 
         // Setup payload mapping to ChatRequest from FastAPI
         const payload = {
-            messages: chatHistory.map(m => {
+            messages: chatHistory.filter(m => m.role !== 'system').map(m => {
                 // Strip out inline HTML image tags from history payload going to backend
                 let cleanContent = m.content.replace(/<br>/g, '\n').replace(/<img[^>]*>/g, '').trim();
                 return {
@@ -803,11 +822,6 @@
         messagesEl.appendChild(typingEl);
         scrollToBottom();
 
-        // Authenticated students -> /ask (unlimited, logged, consented). Guests -> /api/chat.
-        if (authState.authenticated) {
-            return await sendAuthenticated(payload, aiMsgIndex, typingEl);
-        }
-
         try {
             const response = await fetch(`${API_URL}/api/chat`, {
                 method: 'POST',
@@ -821,6 +835,7 @@
                 if (typingEl.parentNode === messagesEl) {
                     messagesEl.removeChild(typingEl);
                 }
+                chatHistory[aiMsgIndex].role = 'system';
                 chatHistory[aiMsgIndex].content = "⚡ You've used your 5 free questions for today!\n\nSign up on our student portal for **unlimited access** to the Quarked AI Tutor:\n\n👉 [Register here](https://app.quarked.tech)\n\nOr WhatsApp Puneet directly: [+91 70113 03807](https://wa.me/917011303807)";
                 localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
                 renderMessages();
@@ -909,6 +924,7 @@
             if (typingEl.parentNode === messagesEl) {
                 messagesEl.removeChild(typingEl);
             }
+            chatHistory[aiMsgIndex].role = 'system';
             chatHistory[aiMsgIndex].content = "Sorry, I had trouble connecting to the Tutor API. Please try asking again.";
             localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
             renderMessages();
@@ -916,87 +932,6 @@
             sendBtn.disabled = false;
         }
     }
-
-    // ---- Authenticated path: /ask (non-streaming JSON) ----
-    async function sendAuthenticated(payload, aiMsgIndex, typingEl) {
-        payload.student_id = authState.student_id;
-        const removeTyping = () => { if (typingEl.parentNode === messagesEl) messagesEl.removeChild(typingEl); };
-        try {
-            const response = await fetch(`${API_URL}/ask`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
-                body: JSON.stringify(payload)
-            });
-
-            if (response.status === 401 || response.status === 403) {
-                // Cookie expired or consent withdrawn -> drop to guest, inform the student
-                authState.authenticated = false;
-                authState.student_id = null;
-                removeTyping();
-                chatHistory[aiMsgIndex].content = "Your tutoring session has ended. Please open your access link again to continue.";
-                localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
-                renderMessages();
-                return;
-            }
-            if (response.status === 429) {
-                removeTyping();
-                const ej = await response.json().catch(() => ({}));
-                chatHistory[aiMsgIndex].content = ej.detail || "Daily question limit reached. Please try again tomorrow.";
-                localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
-                renderMessages();
-                return;
-            }
-            if (!response.ok) {
-                let errorText = `Error ${response.status}: Failed to reach the Tutor API.`;
-                try { const ej = await response.json(); if (ej.detail) errorText = ej.detail; } catch (e) {}
-                throw new Error(errorText);
-            }
-
-            const data = await response.json();
-            removeTyping();
-            chatHistory[aiMsgIndex].content = data.answer || "(no answer returned)";
-            localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
-            renderMessages();
-        } catch (err) {
-            console.error("Authed /ask error:", err);
-            removeTyping();
-            chatHistory[aiMsgIndex].content = "Sorry, I had trouble connecting to the Tutor API. Please try again.";
-            localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
-            renderMessages();
-        } finally {
-            sendBtn.disabled = false;
-        }
-    }
-
-    // ---- Auth bootstrap: redeem ?code= handoff, then probe /session/me ----
-    async function initAuth() {
-        try {
-            const params = new URLSearchParams(window.location.search);
-            const code = params.get('code');
-            if (code) {
-                const r = await fetch(`${API_URL}/session/exchange`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    credentials: 'include',
-                    body: JSON.stringify({ exchange_code: code })
-                });
-                // Strip ?code= from the URL so it isn't reused/visible regardless of outcome
-                params.delete('code');
-                const newUrl = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
-                window.history.replaceState({}, document.title, newUrl);
-            }
-            const me = await fetch(`${API_URL}/session/me`, { credentials: 'include' });
-            if (me.ok) {
-                const data = await me.json();
-                authState.authenticated = true;
-                authState.student_id = data.student_id;
-            }
-        } catch (e) {
-            console.warn('Auth init failed; continuing as guest.', e);
-        }
-    }
-    initAuth();
 
     sendBtn.addEventListener('click', sendMessage);
 

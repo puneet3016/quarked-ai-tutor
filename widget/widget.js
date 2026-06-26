@@ -215,6 +215,27 @@
             color: #ffffff;
         }
 
+        .qk-msg-system {
+            align-self: center;
+            background-color: #1a1a1a;
+            color: #a0a0a0;
+            border: 1px dashed #333333;
+            font-size: 0.85rem;
+            text-align: center;
+            max-width: 90%;
+            border-radius: 8px;
+        }
+        .qk-msg.qk-msg-system strong { color: #f0c674; font-weight: 700; }
+        .qk-msg.qk-msg-system em { font-style: italic; color: #d4a84a; }
+        .qk-msg.qk-msg-system a {
+            color: #f0c674;
+            text-decoration: underline;
+            font-weight: 500;
+        }
+        .qk-msg.qk-msg-system a:hover {
+            color: #ffffff;
+        }
+
         /* Quick Actions */
         .qk-actions {
             padding: 8px 16px;
@@ -641,7 +662,7 @@
         messagesEl.innerHTML = '';
         chatHistory.forEach(msg => {
             const div = document.createElement('div');
-            div.className = 'qk-msg ' + (msg.role === 'user' ? 'qk-msg-user' : 'qk-msg-ai');
+            div.className = 'qk-msg ' + (msg.role === 'user' ? 'qk-msg-user' : msg.role === 'system' ? 'qk-msg-system' : 'qk-msg-ai');
             div.innerHTML = formatMessageText(msg.content);
             messagesEl.appendChild(div);
         });
@@ -775,7 +796,7 @@
 
         // Setup payload mapping to ChatRequest from FastAPI
         const payload = {
-            messages: chatHistory.map(m => {
+            messages: chatHistory.filter(m => m.role !== 'system').map(m => {
                 // Strip out inline HTML image tags from history payload going to backend
                 let cleanContent = m.content.replace(/<br>/g, '\n').replace(/<img[^>]*>/g, '').trim();
                 return {
@@ -814,6 +835,7 @@
                 if (typingEl.parentNode === messagesEl) {
                     messagesEl.removeChild(typingEl);
                 }
+                chatHistory[aiMsgIndex].role = 'system';
                 chatHistory[aiMsgIndex].content = "⚡ You've used your 5 free questions for today!\n\nSign up on our student portal for **unlimited access** to the Quarked AI Tutor:\n\n👉 [Register here](https://app.quarked.tech)\n\nOr WhatsApp Puneet directly: [+91 70113 03807](https://wa.me/917011303807)";
                 localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
                 renderMessages();
@@ -902,6 +924,7 @@
             if (typingEl.parentNode === messagesEl) {
                 messagesEl.removeChild(typingEl);
             }
+            chatHistory[aiMsgIndex].role = 'system';
             chatHistory[aiMsgIndex].content = "Sorry, I had trouble connecting to the Tutor API. Please try asking again.";
             localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
             renderMessages();
