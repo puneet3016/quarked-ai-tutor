@@ -204,9 +204,16 @@
             border-bottom-left-radius: 4px;
         }
 
-        /* Message Formatting elements */
         .qk-msg.qk-msg-ai strong { color: #f0c674; font-weight: 700; }
         .qk-msg.qk-msg-ai em { font-style: italic; color: #d4a84a; }
+        .qk-msg.qk-msg-ai a {
+            color: #f0c674;
+            text-decoration: underline;
+            font-weight: 500;
+        }
+        .qk-msg.qk-msg-ai a:hover {
+            color: #ffffff;
+        }
 
         /* Quick Actions */
         .qk-actions {
@@ -553,13 +560,23 @@
     launcher.addEventListener('click', togglePanel);
     closeBtn.addEventListener('click', togglePanel);
 
-    // Simple formatter for streaming — no KaTeX, just bold + newlines
+    function parseMarkdownText(str) {
+        if (!str) return '';
+        let html = str;
+        // Parse links: [Link Text](URL)
+        html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+        // Parse bold: **text**
+        html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        // Parse italic: *text*
+        html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+        // Parse newlines
+        html = html.replace(/\n/g, '<br/>');
+        return html;
+    }
+
+    // Simple formatter for streaming — no KaTeX, just bold + newlines + links
     function simpleFormatText(text) {
-        if (!text) return '';
-        let result = text;
-        result = result.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-        result = result.replace(/\n/g, '<br/>');
-        return result;
+        return parseMarkdownText(text);
     }
 
     function formatMessageText(text) {
@@ -576,8 +593,7 @@
         while ((match = mathPattern.exec(text)) !== null) {
             // Process text before this math block
             let before = text.slice(lastIndex, match.index);
-            before = before.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            before = before.replace(/\n/g, '<br/>');
+            before = parseMarkdownText(before);
             result += before;
 
             // Extract raw LaTeX (strip delimiters)
@@ -614,8 +630,7 @@
 
         // Process remaining text after last math block
         let remaining = text.slice(lastIndex);
-        remaining = remaining.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-        remaining = remaining.replace(/\n/g, '<br/>');
+        remaining = parseMarkdownText(remaining);
         result += remaining;
 
         return result;
@@ -799,7 +814,7 @@
                 if (typingEl.parentNode === messagesEl) {
                     messagesEl.removeChild(typingEl);
                 }
-                chatHistory[aiMsgIndex].content = "⚡ You've used your 5 free questions for today!\n\nSign up on our student portal for **unlimited access** to the Quarked AI Tutor:\n\n👉 [Register here](https://neon-pithivier-55f97b.netlify.app)\n\nOr WhatsApp Puneet directly: [+91 70113 03807](https://wa.me/917011303807)";
+                chatHistory[aiMsgIndex].content = "⚡ You've used your 5 free questions for today!\n\nSign up on our student portal for **unlimited access** to the Quarked AI Tutor:\n\n👉 [Register here](https://app.quarked.tech)\n\nOr WhatsApp Puneet directly: [+91 70113 03807](https://wa.me/917011303807)";
                 localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
                 renderMessages();
                 return;
