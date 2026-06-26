@@ -20,6 +20,9 @@ os.environ.setdefault("QUESTION_ENC_KEY", "aybYOvSqBtuOqAnwVbn5bGD7KkqJdsX6UmBnp
 os.environ.setdefault("OTP_PEPPER", "test-otp-pepper")
 os.environ.setdefault("RESEND_API_KEY", "re_test_key")
 os.environ.setdefault("OTP_FROM_EMAIL", "Quarked <consent@example.com>")
+# Relaxed cookie settings so the TestClient (http://testserver) can store student_token
+os.environ.setdefault("COOKIE_SECURE", "false")
+os.environ.setdefault("COOKIE_DOMAIN", "")
 
 # Mock Gemini client
 import gemini_client
@@ -30,12 +33,19 @@ gemini_client.client.models.count_tokens.return_value = MagicMock(total_tokens=1
 def mock_generate_content(model, contents, config=None):
     resp = MagicMock()
     resp.usage_metadata = MagicMock(prompt_token_count=150, candidates_token_count=100)
-    schema = config.response_schema if config else None
-    if schema and schema.__name__ == 'AskResult':
+    # config may be a GenerateContentConfig object OR a plain dict
+    if config is None:
+        schema = None
+    elif isinstance(config, dict):
+        schema = config.get('response_schema')
+    else:
+        schema = getattr(config, 'response_schema', None)
+    schema_name = getattr(schema, '__name__', None)
+    if schema_name == 'AskResult':
         resp.text = '{"answer": "Force equals mass times acceleration (F=ma).", "subject": "Physics", "topic": "Forces", "difficulty": "medium", "resolved": true}'
-    elif schema and schema.__name__ == 'MarkResult':
+    elif schema_name == 'MarkResult':
         resp.text = '{"marks_awarded": 3, "marks_available": 3, "mark_breakdown": ["Correct formula"], "feedback": "Good job!", "model_answer": "F=ma"}'
-    elif schema and schema.__name__ == 'QuestionSet':
+    elif schema_name == 'QuestionSet':
         resp.text = '{"questions": [{"question": "Explain Newton\'s second law.", "mark_scheme": ["F=ma"], "marks_available": 3}]}'
     else:
         resp.text = '{}'
@@ -157,14 +167,15 @@ def test_consent_verification_and_withdrawal_flows(mock_post):
         "level": "Extended",
         "student_id": student_id
     }
-    # No cookie -> 401
+    # No cookie -> 401 (clear the jar first; TestClient persists the exchange cookie)
+    client.cookies.clear()
     r_unauth = client.post("/ask", json=chat_payload)
     assert r_unauth.status_code == 401
 
     # With cookie -> 200
     client.cookies["student_token"] = token_cookie
     r = client.post("/ask", json=chat_payload)
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
     assert r.json()["answer"] == "Force equals mass times acceleration (F=ma)."
 
     # 7. Test Practice Marking (/api/mark) with token cookie
@@ -179,7 +190,7 @@ def test_consent_verification_and_withdrawal_flows(mock_post):
         "student_id": student_id
     }
     r = client.post("/api/mark", json=mark_payload)
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
     assert r.json()["marks_awarded"] == 3
 
     # Test student_id mismatch in /api/mark -> 403
@@ -203,7 +214,7 @@ def test_consent_verification_and_withdrawal_flows(mock_post):
     
     # Parent-accessible call using query token -> 200
     r = client.post(f"/consent/withdraw?token={withdraw_token}", json=withdraw_payload)
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
 
     # Verify student.active flipped back to False
     student_db = supabase_client.get_student_by_id(student_id)

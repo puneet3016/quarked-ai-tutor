@@ -100,14 +100,15 @@ def get_consent_events(student_id: str):
         print(f"Error getting consent events: {e}")
         return []
 
-def create_session(student_id: str, model: str):
-    """Create a new chat session."""
+def create_session(student_id: str, model: str, session_id: str | None = None):
+    """Create a new chat session. If session_id is given, use it so the caller's
+    session_id matches the row (otherwise interactions FK-fail against sessions)."""
     try:
         supabase = get_supabase()
-        response = supabase.table('sessions').insert({
-            'student_id': student_id,
-            'model': model
-        }).execute()
+        row = {'student_id': student_id, 'model': model}
+        if session_id:
+            row['id'] = session_id
+        response = supabase.table('sessions').insert(row).execute()
         return response.data[0] if response.data else None
     except Exception as e:
         print(f"Error creating session: {e}")

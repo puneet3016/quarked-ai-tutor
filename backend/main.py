@@ -30,6 +30,8 @@ load_dotenv()
 
 app = FastAPI(title="Quarked AI Tutor Backend")
 security = HTTPBearer()
+# For endpoints reachable WITHOUT an Authorization header (e.g. parent withdrawal via ?token=).
+security_optional = HTTPBearer(auto_error=False)
 
 # Password verification for compatibility admin login
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -43,6 +45,13 @@ SECRET_KEY = _require("SECRET_KEY")
 SERVER_API_KEY = _require("SERVER_API_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
+
+# Cookie attributes — strict in production (https, *.quarked.tech), relaxed for
+# local/test where the host is http://localhost or testserver. Production works
+# on the defaults; the test sets COOKIE_SECURE=false and COOKIE_DOMAIN="".
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "none")
+COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN", ".quarked.tech") or None
 
 # Admin hash generated for 'puneetteenukrisha3055@&*'
 ADMIN_PASSWORD_HASH = "$2b$12$T1xohQQ3LwPwB2r726siMe1UK32kWj40T19xOzn53pcOeq2hQHJne"
@@ -245,24 +254,25 @@ async def get_student_from_cookie(request: Request, response: Response):
                 detail="Invalid token claims"
             )
             
-        # Re-check live consent status
-        budget_guard.require_consent(str(student_id), "tutoring")
-        
-        # Retrieve student to check token version revocation
+        # Retrieve student (needed for the revocation check)
         student = get_student_by_id(str(student_id))
         if not student:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Student not found"
             )
-            
-        # Revocation check via version
+
+        # Revocation check via version FIRST — a revoked token is an auth failure (401),
+        # checked before consent so it isn't masked by a 403 when both apply.
         current_ver = student.get("token_version", 1)
         if token_ver < current_ver:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token has been revoked"
             )
+
+        # Then re-check live consent status (withdrawn consent -> 403)
+        budget_guard.require_consent(str(student_id), "tutoring")
             
         # Silent auto-renewal: renew only when within 30 days of expiry
         # 30 days in seconds = 30 * 24 * 3600 = 2592000
@@ -281,9 +291,9 @@ async def get_student_from_cookie(request: Request, response: Response):
                 key="student_token",
                 value=new_token,
                 httponly=True,
-                secure=True,
-                samesite="none",
-                domain=".quarked.tech",
+                secure=COOKIE_SECURE,
+                samesite=COOKIE_SAMESITE,
+                domain=COOKIE_DOMAIN,
                 max_age=90 * 24 * 3600
             )
             
@@ -323,21 +333,22 @@ async def get_any_auth(request: Request, response: Response, credentials: HTTPAu
     )
 
 
-async def get_withdrawal_auth(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def get_withdrawal_auth(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security_optional)):
     """
     Verifies that the caller is authorized to withdraw consent.
     Accepts:
     1. A valid staff credential (get_current_user).
     2. A token passed in query parameter or request body signed with SECRET_KEY.
     """
-    # 1. Try staff auth
-    try:
-        user = await get_current_user(credentials)
-        if user:
-            return {"type": "staff", "user": user}
-    except Exception:
-        pass
-        
+    # 1. Try staff auth (only if a bearer header was actually supplied)
+    if credentials:
+        try:
+            user = await get_current_user(credentials)
+            if user:
+                return {"type": "staff", "user": user}
+        except Exception:
+            pass
+
     # 2. Try signed withdraw token from query parameters or request body
     token = request.query_params.get("token")
     if not token:
@@ -452,7 +463,7 @@ async def submit_consent(request: ConsentSubmitRequest):
             "purpose": purpose,
             "status": "granted",
             "granted_by": request.granted_by.strip(),
-            "verify_method": request.channel,
+            "verify_method": "otp",  # method is OTP; request.channel (email/sms) is the delivery channel, not a valid verify_method
             "verify_ref": request.challenge_id
         }
         save_consent(consent_data)
@@ -539,9 +550,9 @@ async def session_exchange(request: ExchangeRequest, response: Response):
         key="student_token",
         value=student_token,
         httponly=True,
-        secure=True,
-        samesite="none",
-        domain=".quarked.tech",
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        domain=COOKIE_DOMAIN,
         max_age=90 * 24 * 3600
     )
     
@@ -671,9 +682,9 @@ async def ask(request: ChatRequest, student = Depends(get_student_from_cookie)):
         sb = get_supabase()
         sess_check = sb.table('sessions').select('id').eq('id', session_id).execute()
         if not sess_check.data:
-            create_session(request.student_id, MODEL)
+            create_session(request.student_id, MODEL, session_id)
     except Exception:
-        create_session(request.student_id, MODEL)
+        create_session(request.student_id, MODEL, session_id)
         
     budget_guard.log_interaction(
         session_id=session_id,
@@ -808,9 +819,9 @@ async def chat(request: ChatRequest, req: Request, response: Response, backgroun
                     key="student_token",
                     value=new_token,
                     httponly=True,
-                    secure=True,
-                    samesite="none",
-                    domain=".quarked.tech",
+                    secure=COOKIE_SECURE,
+                    samesite=COOKIE_SAMESITE,
+                    domain=COOKIE_DOMAIN,
                     max_age=90 * 24 * 3600
                 )
         except HTTPException as he:
@@ -853,9 +864,9 @@ async def chat(request: ChatRequest, req: Request, response: Response, backgroun
             sb = get_supabase()
             sess_check = sb.table('sessions').select('id').eq('id', session_id).execute()
             if not sess_check.data:
-                create_session(student_id, MODEL)
+                create_session(student_id, MODEL, session_id)
         except Exception:
-            create_session(student_id, MODEL)
+            create_session(student_id, MODEL, session_id)
             
     # 5. Define streaming generator
     async def generate():
@@ -925,7 +936,7 @@ async def mark_answer(request: MarkRequest, student = Depends(get_student_from_c
         if request.student_id:
             session_id = str(uuid.uuid4())
             try:
-                create_session(request.student_id, MODEL)
+                create_session(request.student_id, MODEL, session_id)
             except Exception:
                 pass
                 
