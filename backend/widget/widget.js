@@ -981,7 +981,7 @@
                 chatHistory.push({
                     role: 'system',
                     content: err.message && (err.message.includes('Quota exceeded') || err.message.includes('RESOURCE_EXHAUSTED'))
-                        ? "⚡ Rate limit or quota exceeded. Please try again later, or sign up for unlimited access."
+                        ? "⚡ Rate limit or quota exceeded. Please try again later, or get unlimited access:\n\n👉 [Register here](https://app.quarked.tech)\n\nOr WhatsApp Puneet directly: [+91 70113 03807](https://wa.me/917011303807)"
                         : `Sorry, I had trouble connecting to the Tutor API. (Error: ${err.message || 'Unknown'})`
                 });
             }
