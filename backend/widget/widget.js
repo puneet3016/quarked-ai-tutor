@@ -2,6 +2,18 @@
     const scriptTag = document.currentScript;
     const API_URL = scriptTag ? scriptTag.getAttribute('data-api-url') : 'http://localhost:8000';
     let chatHistory = JSON.parse(localStorage.getItem('quarked_chat_history') || '[]');
+    // Sanitise old history from cache (auto-migration)
+    chatHistory = chatHistory.map(m => {
+        if (m.content && m.content.includes('neon-pithivier-55f97b.netlify.app')) {
+            m.role = 'system';
+            m.content = m.content.replace(/neon-pithivier-55f97b\.netlify\.app/g, 'app.quarked.tech');
+        }
+        if (m.content && m.content.includes("You've used your 5 free questions")) {
+            m.role = 'system';
+        }
+        return m;
+    });
+    localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
 
     // 1. Inject KaTeX dependencies if not already loaded
     if (!document.getElementById('qk-katex-css')) {
