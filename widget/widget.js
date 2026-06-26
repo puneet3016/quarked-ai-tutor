@@ -596,8 +596,10 @@
     function parseMarkdownText(str) {
         if (!str) return '';
         let html = str;
-        // Parse links: [Link Text](URL)
-        html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+        // Parse markdown links: [Link Text](URL)
+        html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+        // Parse remaining raw URLs that are not part of an existing anchor tag attribute or text
+        html = html.replace(/(?<!href="|src="|">)(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank">$1</a>');
         // Parse bold: **text**
         html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
         // Parse italic: *text*
