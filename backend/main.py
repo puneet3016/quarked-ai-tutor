@@ -159,7 +159,7 @@ class StudentCreateRequest(BaseModel):
     name: str
     grade: str | None = None
     board: str
-    parent_name: str
+    parent_name: str | None = None
     parent_email: EmailStr
     parent_phone: str | None = None
     is_minor: bool = True
@@ -168,7 +168,7 @@ class StudentRegisterRequest(BaseModel):
     name: str
     grade: str | None = None
     board: str
-    parent_name: str
+    parent_name: str | None = None
     parent_email: EmailStr
     parent_phone: str | None = None
     username: str
@@ -415,7 +415,7 @@ async def register_student(request: StudentRegisterRequest):
         "name": request.name.strip(),
         "grade": request.grade,
         "board": request.board,
-        "parent_name": request.parent_name.strip(),
+        "parent_name": (request.parent_name.strip() if request.parent_name else None),
         "parent_email": request.parent_email.lower().strip(),
         "parent_phone": request.parent_phone,
         "username": username,
