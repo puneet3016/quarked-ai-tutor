@@ -230,11 +230,155 @@ def test_consent_verification_and_withdrawal_flows(mock_post):
     sb.table('students').delete().eq('id', student_id).execute()
 
 
+@patch("requests.post")
+def test_portal_registration_and_login_flows(mock_post):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_post.return_value = mock_resp
+
+    print("Starting Quarked student portal compliance tests...")
+    sb = supabase_client.get_supabase()
+    
+    # 1. Clean up any previous test student
+    try:
+        res = sb.table('students').select('id').eq('username', 'portal.test.student').execute()
+        for row in res.data:
+            sb.table('students').delete().eq('id', row['id']).execute()
+    except Exception as e:
+        print(f"Warning during cleanup: {e}")
+
+    # 2. Portal Student Registration
+    register_payload = {
+        "name": "Portal Test Student",
+        "grade": "Year 11",
+        "board": "IGCSE",
+        "parent_name": "Portal Test Parent",
+        "parent_email": "portalparent@example.com",
+        "parent_phone": "+919999999999",
+        "username": "portal.test.student",
+        "password": "portalpassword123"
+    }
+    
+    r = client.post("/api/auth/register", json=register_payload)
+    assert r.status_code == 200, f"Registration failed: {r.text}"
+    reg_data = r.json()
+    assert reg_data["status"] == "pending_consent"
+    student_id = reg_data["student_id"]
+    challenge_id = reg_data["challenge_id"]
+
+    # Verify student is in DB and active is False
+    student_db = supabase_client.get_student_by_id(student_id)
+    assert student_db is not None
+    assert student_db["active"] is False
+    assert student_db["username"] == "portal.test.student"
+    
+    # Try duplicate registration -> should return 400
+    r_dup = client.post("/api/auth/register", json=register_payload)
+    assert r_dup.status_code == 400
+    
+    # 3. Test Student Login Prior to Parent Consent -> should return 403 pending_parent_consent
+    login_payload = {
+        "username": "portal.test.student",
+        "password": "portalpassword123"
+    }
+    r_login = client.post("/api/auth/login", json=login_payload)
+    assert r_login.status_code == 403, f"Expected 403 for inactive student: {r_login.text}"
+    login_err = r_login.json()["detail"]
+    assert login_err["error"] == "pending_parent_consent"
+    assert login_err["student_id"] == student_id
+    assert "challenge_id" in login_err
+
+    # 4. Parent Verifies OTP via /api/consent
+    consent_payload = {
+        "student_id": student_id,
+        "purposes": ["tutoring", "weak_topic_analytics"],
+        "granted_by": "Portal Test Parent",
+        "challenge_id": challenge_id,
+        "code": "123456",
+        "channel": "email"
+    }
+    with patch("otp_service.verify_otp", return_value=(True, "portalparent@example.com")):
+        r_consent = client.post("/api/consent", json=consent_payload)
+        assert r_consent.status_code == 200, f"Consent verification failed: {r_consent.text}"
+        
+    # Verify student active flips to True
+    student_db = supabase_client.get_student_by_id(student_id)
+    assert student_db["active"] is True
+
+    # 5. Login After Consent -> should return 200 with Bearer token
+    r_login_success = client.post("/api/auth/login", json=login_payload)
+    assert r_login_success.status_code == 200, f"Login failed: {r_login_success.text}"
+    login_data = r_login_success.json()
+    assert "token" in login_data
+    token = login_data["token"]
+
+    # 6. Test Chat (/api/chat) with Bearer token in Authorization header
+    chat_payload = {
+        "messages": [
+            {"role": "user", "content": "Explain gravity."}
+        ],
+        "subject": "Physics",
+        "exam_board": "Cambridge IGCSE",
+        "level": "Core"
+    }
+    
+    headers = {"Authorization": f"Bearer {token}"}
+    r_chat = client.post("/api/chat", json=chat_payload, headers=headers)
+    assert r_chat.status_code == 200, f"Chat failed: {r_chat.text}"
+    
+    # 7. Test Practice Marking (/api/mark) with Bearer token
+    mark_payload = {
+        "subject": "Physics",
+        "exam_board": "Cambridge IGCSE",
+        "level": "Core",
+        "topic": "Gravity",
+        "question": "What is gravity?",
+        "mark_scheme": ["attractive force"],
+        "student_answer": "a force that attracts things",
+        "student_id": student_id
+    }
+    r_mark = client.post("/api/mark", json=mark_payload, headers=headers)
+    assert r_mark.status_code == 200, f"Marking failed: {r_mark.text}"
+
+    # 8. Test /api/chat with invalid/expired/stale token -> falls back to GUEST (never 401)
+    bad_headers = {"Authorization": "Bearer bad.token.here"}
+    r_chat_bad = client.post("/api/chat", json=chat_payload, headers=bad_headers)
+    assert r_chat_bad.status_code == 200, "Invalid token in /api/chat must fallback to guest and return 200"
+
+    # 9. Consent Withdrawal & Immediate Revocation Check for Bearer token
+    withdraw_payload = {
+        "student_id": student_id,
+        "purpose": "tutoring",
+        "granted_by": "Portal Test Parent"
+    }
+    withdraw_token_payload = {
+        "sub": student_id,
+        "action": "withdraw",
+        "purposes": ["tutoring"]
+    }
+    withdraw_token = jwt.encode(withdraw_token_payload, SECRET_KEY, algorithm=ALGORITHM)
+    
+    r_withdraw = client.post(f"/api/consent/withdraw?token={withdraw_token}", json=withdraw_payload)
+    assert r_withdraw.status_code == 200
+    
+    # Check that active flipped to False
+    student_db = supabase_client.get_student_by_id(student_id)
+    assert student_db["active"] is False
+
+    # Check that subsequent call to /api/mark with old token is BLOCKED (401 due to revoked version)
+    r_mark_revoked = client.post("/api/mark", json=mark_payload, headers=headers)
+    assert r_mark_revoked.status_code == 401
+
+    # 10. Clean up student
+    sb.table('students').delete().eq('id', student_id).execute()
+
+
 if __name__ == "__main__":
     test_startup_fail_fast()
     try:
         test_consent_verification_and_withdrawal_flows()
-        print("\nAll integration tests passed successfully!")
+        test_portal_registration_and_login_flows()
+        print("\nAll compliance and portal reconciliation tests passed successfully!")
     except AssertionError as e:
         print(f"\nAssertion error during compliance test: {e}")
         sys.exit(1)

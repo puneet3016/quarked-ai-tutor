@@ -164,6 +164,20 @@ class StudentCreateRequest(BaseModel):
     parent_phone: str | None = None
     is_minor: bool = True
 
+class StudentRegisterRequest(BaseModel):
+    name: str
+    grade: str | None = None
+    board: str
+    parent_name: str
+    parent_email: EmailStr
+    parent_phone: str | None = None
+    username: str
+    password: str
+
+class StudentLoginRequest(BaseModel):
+    username: str
+    password: str
+
 class ConsentSubmitRequest(BaseModel):
     student_id: str
     purposes: list[str]
@@ -230,15 +244,22 @@ def _hash_code(code: str) -> str:
 
 async def get_student_from_cookie(request: Request, response: Response):
     """
-    Dependency to authenticate the student from the httpOnly secure cookie.
+    Dependency to authenticate the student from the httpOnly secure cookie OR the Authorization header.
     Validates token signature, expiration, jti, and live database consent check.
     Implements silent auto-renewal if the token is within 30 days of expiry.
     """
-    token = request.cookies.get("student_token")
+    auth_header = request.headers.get("Authorization")
+    token = None
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1].strip()
+        
+    if not token:
+        token = request.cookies.get("student_token")
+        
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing student token cookie"
+            detail="Missing student token"
         )
         
     try:
@@ -374,25 +395,116 @@ async def get_withdrawal_auth(request: Request, credentials: HTTPAuthorizationCr
     )
 
 
-# --- Compatibility Auth Endpoint ---
-@app.post("/api/auth/login")
-async def login(request: AuthRequest):
+# --- Auth Endpoints (Portal & Staff) ---
+
+@app.post("/api/auth/register")
+async def register_student(request: StudentRegisterRequest):
     username = request.username.lower().strip()
-    if username != "admin":
+    
+    if username == "admin":
+        raise HTTPException(status_code=400, detail="Username already exists")
+        
+    sb = get_supabase()
+    existing = sb.table("students").select("id").eq("username", username).execute()
+    if existing.data:
+        raise HTTPException(status_code=400, detail="Username already exists")
+        
+    hashed_password = pwd_context.hash(request.password)
+    
+    student_data = {
+        "name": request.name.strip(),
+        "grade": request.grade,
+        "board": request.board,
+        "parent_name": request.parent_name.strip(),
+        "parent_email": request.parent_email.lower().strip(),
+        "parent_phone": request.parent_phone,
+        "username": username,
+        "password_hash": hashed_password,
+        "is_minor": True,
+        "active": False
+    }
+    
+    created = create_student(student_data)
+    if not created:
+        raise HTTPException(status_code=500, detail="Failed to create student record")
+        
+    from otp_service import request_otp, OtpCooldownError
+    try:
+        challenge_id = request_otp(request.parent_email.lower().strip(), "email")
+    except OtpCooldownError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+        
+    return {
+        "status": "pending_consent",
+        "student_id": created["id"],
+        "challenge_id": challenge_id
+    }
+
+
+@app.post("/api/auth/login")
+async def login(request: StudentLoginRequest):
+    username = request.username.lower().strip()
+    
+    # 1. Staff admin fallback
+    if username == "admin":
+        if not pwd_context.verify(request.password, ADMIN_PASSWORD_HASH):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        access_token = create_access_token(data={"sub": "admin"})
+        return {
+            "token": access_token,
+            "student": {
+                "name": "Puneet Sharma",
+                "username": "admin",
+                "isAdmin": True,
+                "uuid": "admin"
+            },
+            "session_id": str(uuid.uuid4())
+        }
+        
+    # 2. Student path
+    sb = get_supabase()
+    res = sb.table("students").select("*").eq("username", username).execute()
+    if not res.data:
         raise HTTPException(status_code=401, detail="Invalid username or password")
         
-    if not pwd_context.verify(request.password, ADMIN_PASSWORD_HASH):
+    student = res.data[0]
+    if not pwd_context.verify(request.password, student["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
         
-    access_token = create_access_token(data={"sub": "admin"})
+    if not student.get("active", False):
+        from otp_service import request_otp, OtpCooldownError
+        challenge_id = None
+        try:
+            challenge_id = request_otp(student["parent_email"].lower().strip(), "email")
+        except OtpCooldownError:
+            pass
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "pending_parent_consent",
+                "student_id": student["id"],
+                "parent_email": student["parent_email"],
+                "challenge_id": challenge_id
+            }
+        )
+        
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    current_ver = student.get("token_version", 1)
+    payload = {
+        "sub": student["id"],
+        "iat": now_ts,
+        "exp": now_ts + (90 * 24 * 3600),
+        "jti": str(uuid.uuid4()),
+        "version": current_ver
+    }
+    student_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
     
     return {
-        "token": access_token,
+        "token": student_token,
         "student": {
-            "name": "Puneet Sharma",
-            "username": "admin",
-            "isAdmin": True,
-            "uuid": "admin"
+            "id": student["id"],
+            "name": student["name"],
+            "username": student["username"]
         },
         "session_id": str(uuid.uuid4())
     }
@@ -436,6 +548,7 @@ async def get_consent_audit_trail(id: str, current_user = Depends(get_current_us
 
 # --- Parent Consent Endpoints ---
 
+@app.post("/api/consent/otp")
 @app.post("/consent/otp")
 async def send_consent_otp(request: OtpRequest):
     from otp_service import request_otp, OtpCooldownError
@@ -447,6 +560,7 @@ async def send_consent_otp(request: OtpRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send OTP code: {str(e)}")
 
+@app.post("/api/consent")
 @app.post("/consent")
 async def submit_consent(request: ConsentSubmitRequest):
     from otp_service import verify_otp, send_withdrawal_email
@@ -507,6 +621,7 @@ class ExchangeRequest(BaseModel):
     exchange_code: str
 
 
+@app.post("/api/session/exchange")
 @app.post("/session/exchange")
 async def session_exchange(request: ExchangeRequest, response: Response):
     sb = get_supabase()
@@ -559,6 +674,7 @@ async def session_exchange(request: ExchangeRequest, response: Response):
     return {"message": "Session established successfully", "student_id": student_id}
 
 
+@app.post("/api/consent/withdraw")
 @app.post("/consent/withdraw")
 async def withdraw_consent(request: ConsentWithdrawRequest, auth = Depends(get_withdrawal_auth)):
     if auth["type"] == "parent":
@@ -788,8 +904,14 @@ async def chat(request: ChatRequest, req: Request, response: Response, backgroun
     
     student_id = None
     
-    # 1. Attempt to authenticate student via cookie
-    token = req.cookies.get("student_token")
+    # 1. Attempt to authenticate student via header or cookie
+    auth_header = req.headers.get("Authorization")
+    token = None
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1].strip()
+    if not token:
+        token = req.cookies.get("student_token")
+        
     if token:
         try:
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -798,49 +920,42 @@ async def chat(request: ChatRequest, req: Request, response: Response, backgroun
             token_ver = payload.get("version", 1)
             exp = payload.get("exp")
             
-            if not dec_student_id or not jti or not exp:
-                raise HTTPException(status_code=401, detail="Invalid token claims")
-                
-            # Re-check live consent status
-            budget_guard.require_consent(str(dec_student_id), "tutoring")
-            
-            # Retrieve student to check revocation
-            student = get_student_by_id(str(dec_student_id))
-            if not student:
-                raise HTTPException(status_code=401, detail="Student not found")
-                
-            current_ver = student.get("token_version", 1)
-            if token_ver < current_ver:
-                raise HTTPException(status_code=401, detail="Token has been revoked")
-                
-            # Valid student!
-            student_id = str(dec_student_id)
-            
-            # Silent auto-renewal: renew only when within 30 days of expiry
-            now_ts = int(datetime.now(timezone.utc).timestamp())
-            if exp - now_ts < 2592000:
-                new_jti = str(uuid.uuid4())
-                new_payload = {
-                    "sub": student_id,
-                    "iat": now_ts,
-                    "exp": now_ts + (90 * 24 * 3600),
-                    "jti": new_jti,
-                    "version": current_ver
-                }
-                new_token = jwt.encode(new_payload, SECRET_KEY, algorithm=ALGORITHM)
-                response.set_cookie(
-                    key="student_token",
-                    value=new_token,
-                    httponly=True,
-                    secure=COOKIE_SECURE,
-                    samesite=COOKIE_SAMESITE,
-                    domain=COOKIE_DOMAIN,
-                    max_age=90 * 24 * 3600
-                )
-        except HTTPException as he:
-            raise he
+            if dec_student_id and jti and exp:
+                # Retrieve student to check revocation
+                student = get_student_by_id(str(dec_student_id))
+                if student:
+                    current_ver = student.get("token_version", 1)
+                    if token_ver >= current_ver:
+                        # Re-check live consent status
+                        budget_guard.require_consent(str(dec_student_id), "tutoring")
+                        
+                        # Valid student!
+                        student_id = str(dec_student_id)
+                        
+                        # Silent auto-renewal: renew only when within 30 days of expiry
+                        now_ts = int(datetime.now(timezone.utc).timestamp())
+                        if exp - now_ts < 2592000:
+                            new_jti = str(uuid.uuid4())
+                            new_payload = {
+                                "sub": student_id,
+                                "iat": now_ts,
+                                "exp": now_ts + (90 * 24 * 3600),
+                                "jti": new_jti,
+                                "version": current_ver
+                            }
+                            new_token = jwt.encode(new_payload, SECRET_KEY, algorithm=ALGORITHM)
+                            response.set_cookie(
+                                key="student_token",
+                                value=new_token,
+                                httponly=True,
+                                secure=COOKIE_SECURE,
+                                samesite=COOKIE_SAMESITE,
+                                domain=COOKIE_DOMAIN,
+                                max_age=90 * 24 * 3600
+                            )
         except Exception as e:
-            raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
+            # Treat invalid, expired, or consent-withdrawn tokens as guests
+            print(f"Auth failed in /api/chat, falling back to guest: {e}")
             
     # 2. Check gating, consent, and budget based on auth status
     if student_id:
