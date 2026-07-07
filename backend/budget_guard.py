@@ -43,8 +43,9 @@ MONTHLY_BUDGET_USD = MONTHLY_BUDGET_INR / (USD_INR_RATE * GST_MULTIPLIER)
 # Daily cap per student to prevent spamming
 PER_STUDENT_DAILY_REQUEST_CAP = int(os.getenv("PER_STUDENT_DAILY_REQUEST_CAP", "50"))
 
-# Maximum output limit per call
-MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1024"))
+# Maximum output limit per call. Must match the cap actually used by the tutor stream
+# (gemini_client.get_tutor_response_stream) so check_budget's worst-case estimate is honest.
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
 
 # Fernet encryption key setup
 _fernet = Fernet(QUESTION_ENC_KEY.encode())

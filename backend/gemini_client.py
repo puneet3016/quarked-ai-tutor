@@ -120,11 +120,12 @@ def get_tutor_response_stream(user_message: str, conversation_history: list, sys
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
         temperature=0.3,
-        # 2000 was too low: multi-part markings with LaTeX get cut off mid-answer.
-        # Billing is per actual token used, so raising the CAP only lets long replies
-        # finish — it doesn't cost more on short ones. Overall spend stays bounded by
+        # Use the SAME cap the budget guard prices its worst-case against, so the two
+        # never drift apart. 2000 was too low (multi-part LaTeX markings cut off mid-answer);
+        # MAX_OUTPUT_TOKENS is 8192. Billing is per actual token used, so a higher cap only
+        # lets long replies finish — short ones cost the same. Total spend stays bounded by
         # the INR budget guard.
-        max_output_tokens=8192,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
     )
 
     response = None
