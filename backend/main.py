@@ -896,6 +896,29 @@ RESPONSE: {response_text}
         print(f"Error in classify_and_log_interaction background task: {e}")
 
 
+# Pure greetings / filler that shouldn't cost a Gemini call. Kept deliberately tight so
+# real (even short) questions like "why?", "2+2", "solve x^2=4" still go to the tutor.
+_TRIVIAL_MESSAGES = {
+    "hi", "hii", "hiii", "hiya", "hello", "helo", "hey", "heyy", "heya", "yo", "sup",
+    "hola", "namaste", "hi there", "hey there", "hello there",
+    "gm", "gn", "good morning", "good afternoon", "good evening", "good night",
+    "ok", "okay", "k", "kk", "cool", "nice", "great", "lol", "haha", "hehe",
+    "hmm", "hmmm", "test", "testing", "yes", "no", "yup", "nope", "yeah",
+    "thanks", "thank you", "thankyou", "thx", "ty", "tysm",
+}
+
+def _is_trivial_message(text: str) -> bool:
+    """True for pure greetings/filler with no actual question — answered without calling Gemini."""
+    if not text:
+        return True
+    # Strip punctuation/emoji-ish chars, collapse whitespace, lowercase.
+    cleaned = "".join(ch if (ch.isalnum() or ch.isspace()) else " " for ch in text.lower())
+    cleaned = " ".join(cleaned.split())
+    if not cleaned:
+        return True  # only punctuation / emoji
+    return cleaned in _TRIVIAL_MESSAGES
+
+
 @app.post("/api/chat")
 async def chat(request: ChatRequest, req: Request, response: Response, background_tasks: BackgroundTasks):
     from google.genai import types
@@ -999,6 +1022,19 @@ async def chat(request: ChatRequest, req: Request, response: Response, backgroun
     # 5. Define streaming generator
     async def generate():
         try:
+            # Short-circuit pure greetings/filler ("hi", "hello", "ok", ...) with a canned
+            # nudge — no Gemini call, so this abuse pattern costs nothing and never touches
+            # the budget. Skip only when there's no image attached (an image is a real doubt).
+            if not latest_image and _is_trivial_message(current_message):
+                canned = (
+                    "Hey! I'm your Quarked tutor — I'm here for your "
+                    f"{request.subject} doubts. Send me a question (or upload a photo of one) "
+                    "and we'll work through it together. What are you stuck on?"
+                )
+                yield f"data: {json.dumps({'text': canned})}\n\n"
+                yield f"data: {json.dumps({'done': True})}\n\n"
+                return
+
             stream = get_tutor_response_stream(
                 current_message, history, system_prompt, 
                 request.subject, request.exam_board, request.level, 

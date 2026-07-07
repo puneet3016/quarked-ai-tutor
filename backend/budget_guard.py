@@ -203,6 +203,70 @@ def check_student_daily_cap(student_id: str) -> None:
         print(f"Error checking student daily cap: {e}")
 
 # ----------------------------------------------------------------------
+# Budget Alert (email the owner as spend approaches the cap)
+# ----------------------------------------------------------------------
+# Where to send the "budget getting high" heads-up. Override in Railway if needed.
+ADMIN_ALERT_EMAIL = os.getenv("ADMIN_ALERT_EMAIL", "puneet301508@gmail.com")
+# Send once per month at each of these % thresholds (before the 100% hard pause).
+ALERT_THRESHOLDS = [80, 95]
+
+def _send_alert_email(subject: str, body: str) -> None:
+    api_key = os.getenv("RESEND_API_KEY")
+    sender = os.getenv("OTP_FROM_EMAIL")
+    if not (api_key and sender and ADMIN_ALERT_EMAIL):
+        return
+    try:
+        import requests
+        requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"from": sender, "to": [ADMIN_ALERT_EMAIL], "subject": subject, "text": body},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"Budget alert email failed: {e}")
+
+def maybe_send_budget_alert() -> None:
+    """Email the owner once per month per threshold as spend climbs toward the cap.
+    Dedup is via the budget_alerts table (PK month+threshold). Safe no-op if that table
+    doesn't exist yet or email isn't configured. Meant to run in a background task."""
+    try:
+        if MONTHLY_BUDGET_USD <= 0:
+            return
+        spent = month_spent_usd()
+        pct = 100 * spent / MONTHLY_BUDGET_USD
+        month_key = datetime.now(timezone.utc).strftime("%Y-%m")
+        for thr in ALERT_THRESHOLDS:
+            if pct < thr:
+                continue
+            existing = (
+                sb().table("budget_alerts")
+                .select("threshold")
+                .eq("month", month_key)
+                .eq("threshold", thr)
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                continue
+            # Insert BEFORE sending so a race can't double-send (PK month+threshold).
+            sb().table("budget_alerts").insert({"month": month_key, "threshold": thr}).execute()
+            spent_inr = spent * USD_INR_RATE * GST_MULTIPLIER
+            _send_alert_email(
+                subject=f"Quarked AI budget at {thr}% (~Rs{spent_inr:.0f} of Rs{MONTHLY_BUDGET_INR:.0f})",
+                body=(
+                    f"Heads up — your Quarked AI tutor spend for {month_key} has reached "
+                    f"{pct:.0f}% of the monthly cap.\n\n"
+                    f"Spent so far: ~Rs{spent_inr:.0f} (all-in, incl. 18% GST)\n"
+                    f"Monthly cap:  Rs{MONTHLY_BUDGET_INR:.0f}\n\n"
+                    f"At 100% the tutor automatically pauses (students see a 'budget reached' "
+                    f"message) until next month, or until you raise MONTHLY_BUDGET_INR in Railway.\n"
+                ),
+            )
+    except Exception as e:
+        print(f"maybe_send_budget_alert error: {e}")
+
+# ----------------------------------------------------------------------
 # Log Writer Wrapper
 # ----------------------------------------------------------------------
 def log_interaction(*, session_id, student_id, model, input_tokens, output_tokens,
@@ -227,6 +291,8 @@ def log_interaction(*, session_id, student_id, model, input_tokens, output_token
             "resolved": resolved,
             "question_text": db_question_text,
         }).execute()
+        # Fire a budget heads-up email if this pushed spend past a threshold (deduped/month).
+        maybe_send_budget_alert()
         return row.data[0] if row.data else None
     except Exception as e:
         print(f"Error logging interaction: {e}")
