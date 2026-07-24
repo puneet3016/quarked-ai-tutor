@@ -738,6 +738,10 @@ async def session_me(student = Depends(get_student_from_cookie)):
 async def ask(request: ChatRequest, student = Depends(get_student_from_cookie)):
     from google.genai import types
     
+    current_message = request.messages[-1].content
+    if is_crisis_query(current_message):
+        raise HTTPException(status_code=400, detail="CRISIS_DETECTED")
+        
     # Verify client-supplied student_id matches token
     if str(request.student_id) != str(student["id"]):
         raise HTTPException(status_code=403, detail="student_id mismatch")
@@ -863,8 +867,10 @@ RESPONSE: {response_text}
         output_tokens = len(response_text) // 4
 
         try:
+            # Classification is a cheap, simple task — always use the low-cost default model,
+            # regardless of which model answered the student (that model is still logged for cost).
             resp = client.models.generate_content(
-                model=model,
+                model=budget_guard.MODEL,
                 contents=classify_prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -919,10 +925,68 @@ def _is_trivial_message(text: str) -> bool:
     return cleaned in _TRIVIAL_MESSAGES
 
 
+# Keywords/triggers that make a turn accuracy-critical -> route to the smarter model.
+_COMPLEX_TRIGGERS = (
+    "mark", "grade", "check my", "how many marks", "is this correct", "is this right",
+    "correct my", "evaluate my", "assess my", "score my", "am i right", "did i get",
+)
+
+def _choose_model(text: str, has_image: bool) -> str:
+    """Two-tier routing: smarter (costlier) model for marking / image doubts / long
+    multi-part questions; the cheap default for simple, short queries. Bias toward the
+    smarter model when unsure — correctness matters more than the token savings."""
+    if has_image:
+        return budget_guard.MODEL_COMPLEX
+    t = (text or "").lower()
+    if any(k in t for k in _COMPLEX_TRIGGERS):
+        return budget_guard.MODEL_COMPLEX
+    if len(text or "") > 280:  # long / multi-part questions
+        return budget_guard.MODEL_COMPLEX
+    return budget_guard.MODEL
+
+
+CRISIS_PATTERNS = [
+    r"\bsuicide\b",
+    r"\bsuicidal\b",
+    r"\bkill\s+(?:my\s*self|myself)\b",
+    r"\bend\s+my\s+life\b",
+    r"\bending\s+my\s+life\b",
+    r"\bcommit\s+suicide\b",
+    r"\bwant\s+to\s+die\b",
+    r"\bwanna\s+die\b",
+    r"\bdont\s+want\s+to\s+live\b",
+    r"\bdo\s+not\s+want\s+to\s+live\b",
+    r"\bself[- ]harm\b",
+    r"\bcut\s+myself\b",
+    r"\bhang\s+myself\b",
+    r"\bpoison\s+myself\b",
+    r"\bwant\s+to\s+end\s+it\s+all\b",
+    r"\bwanna\s+end\s+it\s+all\b"
+]
+
+def is_crisis_query(text: str) -> bool:
+    if not text:
+        return False
+    import re
+    cleaned = re.sub(r"[^\w\s]", "", text.lower())
+    for pattern in CRISIS_PATTERNS:
+        if re.search(pattern, cleaned):
+            return True
+    return False
+
+
 @app.post("/api/chat")
 async def chat(request: ChatRequest, req: Request, response: Response, background_tasks: BackgroundTasks):
     from google.genai import types
     current_message = request.messages[-1].content
+    
+    # Crisis Safety Check
+    if is_crisis_query(current_message):
+        async def generate_crisis():
+            yield f"data: {json.dumps({'error': 'CRISIS_DETECTED'})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        return StreamingResponse(generate_crisis(), media_type="text/event-stream")
+
     latest_image = request.messages[-1].image
     
     student_id = None
@@ -1035,22 +1099,24 @@ async def chat(request: ChatRequest, req: Request, response: Response, backgroun
                 yield f"data: {json.dumps({'done': True})}\n\n"
                 return
 
+            # Two-tier routing: pick cheap default or smarter model for this turn.
+            chosen_model = _choose_model(current_message, bool(latest_image))
             stream = get_tutor_response_stream(
-                current_message, history, system_prompt, 
-                request.subject, request.exam_board, request.level, 
-                latest_image
+                current_message, history, system_prompt,
+                request.subject, request.exam_board, request.level,
+                latest_image, chosen_model
             )
-            
+
             full_response = ""
             for chunk in stream:
                 full_response += chunk
                 yield f"data: {json.dumps({'text': chunk})}\n\n"
-                
+
             # Log the exchange in the background if it was an active authenticated student
             if student_id and session_id:
                 background_tasks.add_task(
                     classify_and_log_interaction,
-                    session_id, student_id, MODEL, current_message, full_response,
+                    session_id, student_id, chosen_model, current_message, full_response,
                     request.subject, request.exam_board, request.level
                 )
                 

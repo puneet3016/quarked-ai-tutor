@@ -10,7 +10,7 @@ try:
     client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
 except Exception as e:
     print(f"Warning: Gemini client initialization failed: {e}")
-from budget_guard import MODEL, MAX_OUTPUT_TOKENS
+from budget_guard import MODEL, MODEL_COMPLEX, MAX_OUTPUT_TOKENS
 
 import base64
 import re
@@ -82,8 +82,8 @@ def get_or_create_cache(subject: str, exam_board: str, level: str, system_prompt
             CACHES[key] = None
     return CACHES[key]
 
-def get_tutor_response_stream(user_message: str, conversation_history: list, system_prompt: str, subject: str, exam_board: str, level: str, latest_image: str = None):
-    """Stream a tutoring response for real-time display."""
+def get_tutor_response_stream(user_message: str, conversation_history: list, system_prompt: str, subject: str, exam_board: str, level: str, latest_image: str = None, model: str = None):
+    """Stream a tutoring response for real-time display. `model` overrides the default (routing)."""
     
     contents = []
     for msg in conversation_history:
@@ -131,7 +131,7 @@ def get_tutor_response_stream(user_message: str, conversation_history: list, sys
     response = None
     try:
         response = client.models.generate_content_stream(
-            model=MODEL,
+            model=(model or MODEL),
             contents=contents,
             config=config,
         )
@@ -182,7 +182,7 @@ Mark scheme conventions:
 Mix different mark values. Include at least one calculation and one explanation."""
 
     response = client.models.generate_content(
-        model=MODEL,
+        model=MODEL_COMPLEX,
         contents=prompt,
         config={'response_mime_type': 'application/json', 'response_schema': QuestionSet, 'max_output_tokens': MAX_OUTPUT_TOKENS},
     )
@@ -212,7 +212,7 @@ Rules:
 - Be encouraging but honest"""
 
     response = client.models.generate_content(
-        model=MODEL,
+        model=MODEL_COMPLEX,
         contents=prompt,
         config={'response_mime_type': 'application/json', 'response_schema': MarkResult, 'max_output_tokens': MAX_OUTPUT_TOKENS},
     )

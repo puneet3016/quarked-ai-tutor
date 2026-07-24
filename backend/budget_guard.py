@@ -20,15 +20,19 @@ SUPABASE_URL         = _require("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = _require("SUPABASE_SERVICE_KEY")
 QUESTION_ENC_KEY     = _require("QUESTION_ENC_KEY")
 
-# Model Constraint: strictly use gemini-2.5-flash
-MODEL = "gemini-2.5-flash"
+# Two-tier model routing (pricing verified from Google's launch, 2026-07-21):
+#   MODEL         = cheap default for simple / short queries.
+#   MODEL_COMPLEX = smarter model for marking, image doubts, long/multi-part questions.
+# 2.5-flash is deprecated 2026-10-16; 3.5-flash-lite is its same-price, newer replacement.
+MODEL         = os.getenv("MODEL", "gemini-3.5-flash-lite")     # default / simple
+MODEL_COMPLEX = os.getenv("MODEL_COMPLEX", "gemini-3.6-flash")  # marking / complex
 
-# Live per-1M-token prices (USD) as of June 2026.
-# gemini-1.5-flash and gemini-2.0-flash are retired.
-# gemini-3.5-flash is too expensive for routine use.
+# Live per-1M-token prices (USD).
 PRICES = {
     "gemini-2.5-flash-lite": {"in": 0.10, "out": 0.40},
-    "gemini-2.5-flash":      {"in": 0.30, "out": 2.50},
+    "gemini-2.5-flash":      {"in": 0.30, "out": 2.50},   # deprecated 2026-10-16
+    "gemini-3.5-flash-lite": {"in": 0.30, "out": 2.50},   # MODEL (default)
+    "gemini-3.6-flash":      {"in": 1.50, "out": 7.50},   # MODEL_COMPLEX
     "gemini-3.5-flash":      {"in": 1.50, "out": 9.00},
 }
 
@@ -157,7 +161,8 @@ class BudgetStatus:
 def check_budget(estimated_input_tokens: int) -> BudgetStatus:
     """Block calls if the upcoming interaction's worst-case cost exceeds the monthly limit."""
     spent = month_spent_usd()
-    upcoming = cost_usd(MODEL, estimated_input_tokens, MAX_OUTPUT_TOKENS)
+    # Price the worst case against the COMPLEX (costlier) model, since any call may route there.
+    upcoming = cost_usd(MODEL_COMPLEX, estimated_input_tokens, MAX_OUTPUT_TOKENS)
 
     if spent + upcoming > MONTHLY_BUDGET_USD:
         spent_inr = spent * USD_INR_RATE * GST_MULTIPLIER

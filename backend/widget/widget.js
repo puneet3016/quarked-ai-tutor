@@ -485,6 +485,40 @@
     const boardSelect = document.getElementById('qk-board-select');
     const levelSelect = document.getElementById('qk-level-select');
 
+    // Crisis Self-Harm Gating Configuration
+    const CRISIS_HELP_TEXT = `It sounds like you're going through a very difficult time, and we want you to know that you're not alone and there is support available.
+
+Please reach out to someone who can support you right now. There are people who care and want to help you through this.
+
+**Emergency & Crisis Support Services:**
+* **General Emergency Services (India):** Call **112** (available 24/7)
+* **Kiran Mental Health Helpline (India):** Call **1800-599-0019** (toll-free helpline by Ministry of Social Justice and Empowerment)
+* **Vandrevala Foundation (India):** Call **1860-2662-345** or **1800-2333-330** (available 24/7, offering free psychological counseling)
+* **AASRA (India):** Call **+91-9820466726** (available 24/7 for support during distress)
+* **National Suicide Prevention Lifeline (US):** Call or text **988**
+* **Samaritans (UK):** Call **116 123**
+
+Please talk to a trusted adult, a friend, a family member, or a mental health professional. Your life is valuable, and there are resources to help you find a path forward.`;
+
+    const crisisRegex = /\b(suicide|suicidal|kill\s+my\s*self|end\s+my\s+life|ending\s+my\s+life|commit\s+suicide|want\s+to\s+die|wanna\s+die|dont\s+want\s+to\s+live|dont\s+wanna\s+live|do\s+not\s+want\s+to\s+live|self[- ]harm|cut\s+myself|hang\s+myself|poison\s+myself|want\s+to\s+end\s+it\s+all|wanna\s+end\s+it\s+all)\b/i;
+
+    function blockWidget() {
+        localStorage.setItem('quarked_chat_blocked', 'true');
+        inputEl.disabled = true;
+        inputEl.placeholder = "Conversation disabled for safety reasons.";
+        sendBtn.disabled = true;
+        sendBtn.style.cursor = 'not-allowed';
+        const optBtn = document.getElementById('qk-gen-btn');
+        if (optBtn) {
+            optBtn.disabled = true;
+            optBtn.style.cursor = 'not-allowed';
+        }
+    }
+
+    if (localStorage.getItem('quarked_chat_blocked') === 'true') {
+        blockWidget();
+    }
+
     // Select dropdown dynamics
     async function updateLevelDropdown() {
         const subject = subjectSelect.value;
@@ -794,6 +828,25 @@
         const text = inputEl.value.trim();
         if (!text && !selectedImageBase64) return;
 
+        if (crisisRegex.test(text)) {
+            // Block conversation instantly
+            inputEl.value = '';
+            inputEl.style.height = '44px';
+            sendBtn.disabled = true;
+            chatHistory.push({ role: 'user', content: text });
+            chatHistory.push({ role: 'assistant', content: CRISIS_HELP_TEXT });
+            localStorage.setItem('quarked_chat_history', JSON.stringify(chatHistory));
+            renderMessages();
+            blockWidget();
+            scrollToBottom();
+            
+            // Clear previews
+            selectedImageBase64 = null;
+            imagePreviewContainer.style.display = 'none';
+            fileInput.value = '';
+            return;
+        }
+
         // Reset inputs
         inputEl.value = '';
         inputEl.style.height = '44px';
@@ -969,8 +1022,13 @@
                 messagesEl.removeChild(streamingDiv);
             }
 
-            // Decide whether to overwrite the assistant message or add a system warning
-            if (aiMsgIndex !== -1 && assistantResponseText) {
+            if (err.message === "CRISIS_DETECTED") {
+                chatHistory.push({
+                    role: 'assistant',
+                    content: CRISIS_HELP_TEXT
+                });
+                blockWidget();
+            } else if (aiMsgIndex !== -1 && assistantResponseText) {
                 // We got partial text. Append error message to history as system warning
                 chatHistory.push({
                     role: 'system',
