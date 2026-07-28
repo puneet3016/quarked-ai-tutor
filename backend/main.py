@@ -1219,3 +1219,325 @@ async def serve_widget_loader():
     if os.path.exists(widget_path):
         return FileResponse(widget_path, media_type="application/javascript", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
     raise HTTPException(status_code=404, detail="Widget loader not found")
+
+
+# ============================================================================
+# WhatsApp Cloud API webhook
+#
+# A Cloud API number has NO inbox app — inbound messages exist ONLY as webhook
+# POSTs from Meta. Without this endpoint deployed, messages are counted by Meta
+# and lost forever (26 were lost 28 Jun–25 Jul 2026). Delivery receipts for our
+# OUTBOUND sends arrive here too, which is how we see *why* a send fails.
+#
+# Meta setup: App > WhatsApp > Configuration > Callback URL
+#   URL   : https://api.quarked.tech/whatsapp/webhook
+#   Verify: value of WHATSAPP_VERIFY_TOKEN
+#   Subscribe to fields: messages   (covers both messages and statuses)
+#
+# Railway env vars needed: WHATSAPP_VERIFY_TOKEN, WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID
+# ============================================================================
+from fastapi.responses import PlainTextResponse
+
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN") or os.getenv("VERIFY_TOKEN")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID") or os.getenv("PHONE_NUMBER_ID")
+# Canned acknowledgement so a new enquiry is never met with silence again.
+# NOT the AI tutor — auto-tutoring over WhatsApp would bypass parental consent (DPDP).
+WHATSAPP_AUTO_ACK = os.getenv("WHATSAPP_AUTO_ACK", "false").lower() == "true"
+WHATSAPP_ACK_TEXT = os.getenv(
+    "WHATSAPP_ACK_TEXT",
+    "Thanks for messaging Quarked! Puneet has received your message and will reply "
+    "personally soon. For the AI tutor, register at https://app.quarked.tech"
+)
+
+
+@app.get("/whatsapp/webhook")
+@app.get("/api/whatsapp/webhook")
+async def whatsapp_verify(request: Request):
+    """Meta calls this once to verify the callback URL."""
+    params = request.query_params
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+    if mode == "subscribe" and token and token == WHATSAPP_VERIFY_TOKEN:
+        return PlainTextResponse(content=challenge or "", status_code=200)
+    raise HTTPException(status_code=403, detail="Verification failed")
+
+
+def _wa_send_text(to: str, body: str) -> None:
+    """Plain-text reply (valid inside the 24h window opened by their message)."""
+    if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID):
+        print("WA ack skipped: WHATSAPP_TOKEN / PHONE_NUMBER_ID not set")
+        return
+    try:
+        import requests
+        r = requests.post(
+            f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_NUMBER_ID}/messages",
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                     "Content-Type": "application/json"},
+            json={"messaging_product": "whatsapp", "to": to,
+                  "type": "text", "text": {"body": body}},
+            timeout=15,
+        )
+        print(f"WA ack -> {to}: HTTP {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"WA ack failed: {e}")
+
+
+def _wa_store_message(msg: dict, contacts: list) -> str | None:
+    """Persist one inbound message. Returns sender number if we should auto-ack."""
+    sb = get_supabase()
+    wamid = msg.get("id")
+    sender = msg.get("from")
+    mtype = msg.get("type")
+
+    profile_name = None
+    for c in contacts or []:
+        if c.get("wa_id") == sender:
+            profile_name = (c.get("profile") or {}).get("name")
+
+    body, media_id = None, None
+    if mtype == "text":
+        body = (msg.get("text") or {}).get("body")
+    elif mtype in ("image", "document", "video", "audio", "sticker"):
+        node = msg.get(mtype) or {}
+        body = node.get("caption")
+        media_id = node.get("id")
+    elif mtype == "button":
+        body = (msg.get("button") or {}).get("text")
+    elif mtype == "interactive":
+        body = json.dumps(msg.get("interactive"))
+
+    try:
+        sb.table("whatsapp_messages").insert({
+            "wa_message_id": wamid,
+            "from_number": sender,
+            "profile_name": profile_name,
+            "msg_type": mtype,
+            "body": body,
+            "media_id": media_id,
+            "direction": "in",
+            "raw": msg,
+        }).execute()
+        print(f"WA inbound stored: {sender} ({profile_name}) {mtype}: {str(body)[:80]}")
+        return sender
+    except Exception as e:
+        # Duplicate wamid = Meta retry; that's fine, don't re-ack.
+        print(f"WA inbound store skipped/failed ({wamid}): {e}")
+        return None
+
+
+def _wa_store_status(st: dict) -> None:
+    """Persist a delivery receipt. 'failed' entries carry the reason we've been hunting."""
+    sb = get_supabase()
+    errs = st.get("errors") or []
+    e0 = errs[0] if errs else {}
+    try:
+        sb.table("whatsapp_statuses").insert({
+            "wa_message_id": st.get("id"),
+            "recipient": st.get("recipient_id"),
+            "status": st.get("status"),
+            "error_code": str(e0.get("code")) if e0.get("code") is not None else None,
+            "error_title": e0.get("title"),
+            "error_detail": (e0.get("error_data") or {}).get("details") or e0.get("message"),
+            "raw": st,
+        }).execute()
+        if st.get("status") == "failed":
+            print(f"WA DELIVERY FAILED -> {st.get('recipient_id')}: "
+                  f"{e0.get('code')} {e0.get('title')} | "
+                  f"{(e0.get('error_data') or {}).get('details')}")
+        else:
+            print(f"WA status {st.get('status')} -> {st.get('recipient_id')}")
+    except Exception as e:
+        print(f"WA status store failed: {e}")
+
+
+@app.post("/whatsapp/webhook")
+@app.post("/api/whatsapp/webhook")
+async def whatsapp_receive(request: Request, background_tasks: BackgroundTasks):
+    """Receive inbound messages + delivery statuses. ALWAYS return 200 quickly,
+    otherwise Meta retries and eventually disables the webhook."""
+    try:
+        body = await request.json()
+    except Exception:
+        return {"status": "ok"}
+
+    try:
+        for entry in body.get("entry", []) or []:
+            for change in entry.get("changes", []) or []:
+                value = change.get("value", {}) or {}
+                contacts = value.get("contacts", []) or []
+
+                for msg in value.get("messages", []) or []:
+                    sender = _wa_store_message(msg, contacts)
+                    if sender and WHATSAPP_AUTO_ACK:
+                        background_tasks.add_task(_wa_send_text, sender, WHATSAPP_ACK_TEXT)
+
+                for st in value.get("statuses", []) or []:
+                    _wa_store_status(st)
+    except Exception as e:
+        print(f"WA webhook processing error: {e}")
+
+    return {"status": "ok"}
+
+
+@app.get("/api/admin/whatsapp")
+async def admin_whatsapp(limit: int = 100, current_user = Depends(get_current_user)):
+    """Staff-gated: recent inbound messages + recent delivery statuses (incl. failures)."""
+    sb = get_supabase()
+    out = {"messages": [], "statuses": []}
+    try:
+        m = (sb.table("whatsapp_messages").select("*")
+             .order("received_at", desc=True).limit(limit).execute())
+        out["messages"] = m.data or []
+    except Exception as e:
+        out["messages_error"] = str(e)
+    try:
+        s = (sb.table("whatsapp_statuses").select("*")
+             .order("occurred_at", desc=True).limit(limit).execute())
+        out["statuses"] = s.data or []
+    except Exception as e:
+        out["statuses_error"] = str(e)
+    return out
+
+
+# --- Inbox: conversations, threads, replies (staff-gated) -------------------
+class WhatsAppReply(BaseModel):
+    to: str
+    body: str
+
+
+@app.get("/api/admin/whatsapp/conversations")
+async def whatsapp_conversations(current_user = Depends(get_current_user)):
+    """One row per contact: last message, unhandled count, and whether the free-text
+    24h window is still open (outside it, WhatsApp only allows approved templates)."""
+    sb = get_supabase()
+    try:
+        res = (sb.table("whatsapp_messages").select("*")
+               .order("received_at", desc=True).limit(1000).execute())
+        rows = res.data or []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load: {e}")
+
+    convos: dict[str, dict] = {}
+    for r in rows:  # newest first
+        contact = r.get("to_number") if r.get("direction") == "out" else r.get("from_number")
+        if not contact:
+            continue
+        c = convos.setdefault(contact, {
+            "contact": contact, "profile_name": None, "last_message": None,
+            "last_at": None, "last_direction": None, "unhandled": 0,
+            "last_inbound_at": None,
+        })
+        if r.get("profile_name") and not c["profile_name"]:
+            c["profile_name"] = r["profile_name"]
+        if c["last_at"] is None:
+            c["last_message"] = r.get("body")
+            c["last_at"] = r.get("received_at")
+            c["last_direction"] = r.get("direction", "in")
+        if r.get("direction", "in") == "in":
+            if c["last_inbound_at"] is None:
+                c["last_inbound_at"] = r.get("received_at")
+            if not r.get("handled"):
+                c["unhandled"] += 1
+
+    now = datetime.now(timezone.utc)
+    for c in convos.values():
+        open_window, hrs = False, None
+        if c["last_inbound_at"]:
+            try:
+                t = datetime.fromisoformat(str(c["last_inbound_at"]).replace("Z", "+00:00"))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                left = 24 - (now - t).total_seconds() / 3600
+                open_window, hrs = left > 0, round(max(left, 0), 1)
+            except Exception:
+                pass
+        c["window_open"] = open_window
+        c["window_hours_left"] = hrs
+
+    out = sorted(convos.values(), key=lambda x: x["last_at"] or "", reverse=True)
+    return {"conversations": out}
+
+
+@app.get("/api/admin/whatsapp/thread/{contact}")
+async def whatsapp_thread(contact: str, current_user = Depends(get_current_user)):
+    """Full message history with one contact, oldest first."""
+    sb = get_supabase()
+    try:
+        a = sb.table("whatsapp_messages").select("*").eq("from_number", contact).execute()
+        b = sb.table("whatsapp_messages").select("*").eq("to_number", contact).execute()
+        rows = (a.data or []) + (b.data or [])
+        seen, uniq = set(), []
+        for r in rows:
+            if r["id"] in seen:
+                continue
+            seen.add(r["id"])
+            uniq.append(r)
+        uniq.sort(key=lambda r: r.get("received_at") or "")
+        return {"contact": contact, "messages": uniq}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load thread: {e}")
+
+
+@app.post("/api/admin/whatsapp/send")
+async def whatsapp_send(req: WhatsAppReply, current_user = Depends(get_current_user)):
+    """Send a free-text reply. Only valid inside the 24h window; outside it Meta
+    returns error 131047 and you must use an approved template instead."""
+    if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID):
+        raise HTTPException(status_code=500,
+                            detail="WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID not configured")
+    import requests
+    try:
+        r = requests.post(
+            f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_NUMBER_ID}/messages",
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                     "Content-Type": "application/json"},
+            json={"messaging_product": "whatsapp", "to": req.to,
+                  "type": "text", "text": {"body": req.body}},
+            timeout=20,
+        )
+        data = r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"WhatsApp send failed: {e}")
+
+    if "error" in data:
+        err = data["error"]
+        detail = err.get("message", "send failed")
+        if str(err.get("code")) == "131047":
+            detail = ("24-hour window closed — this contact must message you again, "
+                      "or you must send an approved template.")
+        raise HTTPException(status_code=400, detail=detail)
+
+    msgs = data.get("messages") or []
+    wamid = msgs[0].get("id") if msgs else None
+    sb = get_supabase()
+    try:
+        sb.table("whatsapp_messages").insert({
+            "wa_message_id": wamid,
+            "from_number": WHATSAPP_PHONE_NUMBER_ID,
+            "to_number": req.to,
+            "direction": "out",
+            "msg_type": "text",
+            "body": req.body,
+            "handled": True,
+            "raw": data,
+        }).execute()
+        # Replying resolves the thread.
+        sb.table("whatsapp_messages").update({"handled": True}) \
+          .eq("from_number", req.to).eq("direction", "in").execute()
+    except Exception as e:
+        print(f"WA outbound store failed: {e}")
+
+    return {"status": "sent", "message_id": wamid}
+
+
+@app.post("/api/admin/whatsapp/handled/{contact}")
+async def whatsapp_mark_handled(contact: str, current_user = Depends(get_current_user)):
+    sb = get_supabase()
+    try:
+        sb.table("whatsapp_messages").update({"handled": True}) \
+          .eq("from_number", contact).eq("direction", "in").execute()
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

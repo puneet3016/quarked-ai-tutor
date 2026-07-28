@@ -31,3 +31,18 @@ END $$;
 -- NOTE: We intentionally add NO policies. With RLS enabled and no policy, the anon and
 -- authenticated roles get deny-all; only the service_role (backend) can read/write.
 -- Do NOT add a permissive "allow all" policy — that would re-open the exposure.
+
+-- ---------------------------------------------------------------------------
+-- 3. Fix Supabase "Security Definer View" alert on public.monthly_spend_usd
+--    (added 2026-07-24).
+--
+-- WHY: the view sums cost_usd from `interactions`. As a SECURITY DEFINER view it runs
+-- with the creator's privileges and can bypass the RLS enabled above, leaking spend
+-- totals to the anon/public role. Flipping it to SECURITY INVOKER makes it respect the
+-- querying role's RLS. The backend uses the service_role key (BYPASSRLS), so it keeps
+-- reading the view fine; anon/public gets nothing.
+ALTER VIEW public.monthly_spend_usd SET (security_invoker = on);
+
+-- Belt-and-suspenders: only the backend (service_role) needs this view, so remove the
+-- public API roles' access entirely. service_role is unaffected.
+REVOKE ALL ON public.monthly_spend_usd FROM anon, authenticated;
