@@ -171,3 +171,41 @@ def send_withdrawal_email(destination: str, student_name: str, link: str) -> Non
         timeout=10,
     )
     r.raise_for_status()
+
+
+def send_lead_email_notification(lead_type: str, details: dict) -> None:
+    """Send instant email alert for new web registration or WhatsApp lead via Resend."""
+    api_key = os.getenv("RESEND_API_KEY")
+    sender_email = os.getenv("OTP_FROM_EMAIL")
+    recipient = os.getenv("ADMIN_ALERT_EMAIL", "puneet301508@gmail.com")
+
+    if not api_key or not sender_email:
+        print("Warning: Missing RESEND_API_KEY or OTP_FROM_EMAIL, skipping lead email alert.")
+        return
+
+    subject = f"🎯 New {lead_type} Lead: {details.get('name', 'Prospect')}"
+
+    lines = [f"New {lead_type} received on Quarked!\n"]
+    for k, v in details.items():
+        if v:
+            lines.append(f"• {k.replace('_', ' ').title()}: {v}")
+
+    lines.append("\nView and manage in the Admin Portal: https://app.quarked.tech")
+    body = "\n".join(lines)
+
+    try:
+        r = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "from": sender_email,
+                "to": [recipient],
+                "subject": subject,
+                "text": body,
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        print(f"Lead email alert sent to {recipient}")
+    except Exception as e:
+        print(f"Failed to send lead email alert: {e}")

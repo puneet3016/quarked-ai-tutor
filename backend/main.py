@@ -437,9 +437,18 @@ async def register_student(request: StudentRegisterRequest):
     if not created:
         raise HTTPException(status_code=500, detail="Failed to create student record")
         
-    from otp_service import request_otp, OtpCooldownError
+    from otp_service import request_otp, OtpCooldownError, send_lead_email_notification
     try:
         challenge_id = request_otp(request.parent_email.lower().strip(), "email")
+        send_lead_email_notification("Web Registration", {
+            "name": request.name.strip(),
+            "grade": request.grade,
+            "board": request.board,
+            "parent_name": request.parent_name,
+            "parent_email": request.parent_email,
+            "parent_phone": request.parent_phone,
+            "username": username,
+        })
     except OtpCooldownError as e:
         raise HTTPException(status_code=429, detail=str(e))
         
@@ -1337,6 +1346,16 @@ def _wa_store_message(msg: dict, contacts: list) -> str | None:
         body = json.dumps(msg.get("interactive"))
 
     try:
+        # Send instant lead email alert if this is a new WhatsApp contact
+        existing = sb.table("whatsapp_messages").select("id").eq("from_number", sender).limit(1).execute()
+        if not existing.data:
+            from otp_service import send_lead_email_notification
+            send_lead_email_notification("WhatsApp Inquiry", {
+                "name": profile_name or f"+{sender}",
+                "phone": f"+{sender}",
+                "message": body or f"({mtype})",
+            })
+
         sb.table("whatsapp_messages").insert({
             "wa_message_id": wamid,
             "from_number": sender,
