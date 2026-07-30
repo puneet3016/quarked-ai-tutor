@@ -208,19 +208,11 @@ class AuthRequest(BaseModel):
     password: str
 
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Dependency that verifies tutor/staff authentication using either SERVER_API_KEY, local Admin JWT, or Supabase JWT."""
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    
-    token = credentials.credentials
+def verify_user_token(token: str):
+    if not token:
+        return None
     if token == SERVER_API_KEY:
         return {"id": "server", "username": "server", "is_admin": True}
-    
-    # 1. Try local JWT decode (compatibility for admin login)
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
@@ -228,12 +220,22 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             return {"id": "admin", "username": "admin", "is_admin": True}
     except Exception:
         pass
-
-    # 2. Fallback to Supabase Auth JWT verification
     user = verify_supabase_jwt(token)
-    if user is None:
+    if user:
+        return {"id": user.id, "email": user.email, "username": user.email, "is_admin": True}
+    return None
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Dependency that verifies tutor/staff authentication using either SERVER_API_KEY, local Admin JWT, or Supabase JWT."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    user = verify_user_token(credentials.credentials)
+    if not user:
         raise credentials_exception
-    return {"id": user.id, "email": user.email, "username": user.email, "is_admin": True}
+    return user
 
 async def get_current_admin(current_user: dict = Depends(get_current_user)):
     """In beta, any authenticated staff member is authorized."""
@@ -1584,16 +1586,8 @@ async def whatsapp_get_media(media_id: str, request: Request):
     elif request.query_params.get("token"):
         token = request.query_params.get("token")
         
-    if not token:
+    if not token or not verify_user_token(token):
         raise HTTPException(status_code=401, detail="Authentication required")
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        user = get_student_by_username(username)
-        if not user or not user.get("is_admin"):
-            raise HTTPException(status_code=403, detail="Admin access required")
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
 
     if not WHATSAPP_TOKEN:
         raise HTTPException(status_code=500, detail="WHATSAPP_TOKEN not configured")
