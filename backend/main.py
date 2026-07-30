@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, Depends, Response, status, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, Depends, Response, status, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -115,10 +115,17 @@ app.add_middleware(
     allow_origins=[
         "https://app.quarked.tech",
         "https://quarked.tech",
+        "https://www.quarked.tech",
         "https://neon-pithivier-55f97b.netlify.app",
+        "https://papaya-banoffee-72c688.netlify.app",
         "http://localhost:5173",
         "http://localhost:8000"
     ],
+    # Netlify gives every upload its own deploy URL, e.g.
+    #   https://6a69cd03e8863f4f215d9be2--neon-pithivier-55f97b.netlify.app
+    # Those are different ORIGINS, so without this a freshly-dropped deploy fails
+    # every API call with a bare "Failed to fetch" (CORS). Scoped to OUR sites only.
+    allow_origin_regex=r"^https://([a-z0-9-]+--)?(neon-pithivier-55f97b|papaya-banoffee-72c688)\.netlify\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1241,6 +1248,25 @@ from fastapi.responses import PlainTextResponse
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN") or os.getenv("VERIFY_TOKEN")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID") or os.getenv("PHONE_NUMBER_ID")
+# Meta signs every webhook POST with HMAC-SHA256 using the App Secret. Verifying it is
+# what actually stops someone POSTing forged messages into the DB — the verify token
+# only guards the one-time GET handshake and is NOT a security control for POSTs.
+META_APP_SECRET = os.getenv("META_APP_SECRET")
+
+
+def _verify_meta_signature(raw_body: bytes, header: str | None) -> bool:
+    """True if X-Hub-Signature-256 matches HMAC(app_secret, body). If META_APP_SECRET
+    isn't configured we log loudly and allow, so setup isn't blocked — but set it."""
+    if not META_APP_SECRET:
+        print("WARNING: META_APP_SECRET not set — webhook POSTs are UNVERIFIED. "
+              "Anyone who knows this URL could forge messages. Set it in Railway.")
+        return True
+    if not header or not header.startswith("sha256="):
+        return False
+    import hashlib
+    import hmac as _hmac
+    expected = _hmac.new(META_APP_SECRET.encode(), raw_body, hashlib.sha256).hexdigest()
+    return _hmac.compare_digest(expected, header.split("=", 1)[1])
 # Canned acknowledgement so a new enquiry is never met with silence again.
 # NOT the AI tutor — auto-tutoring over WhatsApp would bypass parental consent (DPDP).
 WHATSAPP_AUTO_ACK = os.getenv("WHATSAPP_AUTO_ACK", "false").lower() == "true"
@@ -1357,8 +1383,13 @@ def _wa_store_status(st: dict) -> None:
 async def whatsapp_receive(request: Request, background_tasks: BackgroundTasks):
     """Receive inbound messages + delivery statuses. ALWAYS return 200 quickly,
     otherwise Meta retries and eventually disables the webhook."""
+    raw = await request.body()
+    if not _verify_meta_signature(raw, request.headers.get("X-Hub-Signature-256")):
+        print("WA webhook REJECTED: bad or missing X-Hub-Signature-256")
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
     try:
-        body = await request.json()
+        body = json.loads(raw)
     except Exception:
         return {"status": "ok"}
 
@@ -1541,3 +1572,145 @@ async def whatsapp_mark_handled(contact: str, current_user = Depends(get_current
         return {"status": "ok"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/whatsapp/media/{media_id}")
+async def whatsapp_get_media(media_id: str, request: Request):
+    """Proxy endpoint to stream WhatsApp media binaries securely using WHATSAPP_TOKEN."""
+    token = None
+    auth_h = request.headers.get("Authorization")
+    if auth_h and auth_h.startswith("Bearer "):
+        token = auth_h.split(" ")[1]
+    elif request.query_params.get("token"):
+        token = request.query_params.get("token")
+        
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        user = get_student_by_username(username)
+        if not user or not user.get("is_admin"):
+            raise HTTPException(status_code=403, detail="Admin access required")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    if not WHATSAPP_TOKEN:
+        raise HTTPException(status_code=500, detail="WHATSAPP_TOKEN not configured")
+    import requests
+    try:
+        r = requests.get(
+            f"https://graph.facebook.com/v22.0/{media_id}",
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail="Meta media metadata fetch failed")
+        meta = r.json()
+        media_url = meta.get("url")
+        mime_type = meta.get("mime_type", "image/jpeg")
+
+        if not media_url:
+            raise HTTPException(status_code=404, detail="Media URL missing from Meta response")
+
+        res = requests.get(
+            media_url,
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+            timeout=30,
+        )
+        if res.status_code != 200:
+            raise HTTPException(status_code=res.status_code, detail="Meta media download failed")
+
+        return Response(content=res.content, media_type=mime_type)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed loading media: {e}")
+
+
+@app.post("/api/admin/whatsapp/send_media")
+async def whatsapp_send_media(
+    to: str = Form(...),
+    caption: str = Form(""),
+    file: UploadFile = File(...),
+    current_user = Depends(get_current_user)
+):
+    """Upload an image to Meta and send it to a contact on WhatsApp."""
+    if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID):
+        raise HTTPException(status_code=500, detail="WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID missing")
+    import requests
+
+    file_bytes = await file.read()
+    content_type = file.content_type or "image/jpeg"
+    filename = file.filename or "image.jpg"
+
+    try:
+        # Step 1: Upload image file to Meta media server
+        upload_res = requests.post(
+            f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_NUMBER_ID}/media",
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+            data={"messaging_product": "whatsapp", "type": content_type},
+            files={"file": (filename, file_bytes, content_type)},
+            timeout=30,
+        )
+        upload_data = upload_res.json()
+        if "id" not in upload_data:
+            err_msg = (upload_data.get("error") or {}).get("message", "Media upload failed")
+            raise HTTPException(status_code=400, detail=f"Meta media upload failed: {err_msg}")
+        
+        media_id = upload_data["id"]
+
+        # Step 2: Send image message
+        img_payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "image",
+            "image": {"id": media_id}
+        }
+        if caption.strip():
+            img_payload["image"]["caption"] = caption.strip()
+
+        send_res = requests.post(
+            f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_NUMBER_ID}/messages",
+            headers={
+                "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            json=img_payload,
+            timeout=20,
+        )
+        send_data = send_res.json()
+        if "error" in send_data:
+            err = send_data["error"]
+            detail = err.get("message", "Image send failed")
+            if str(err.get("code")) == "131047":
+                detail = "24-hour window closed — this contact must message you again."
+            raise HTTPException(status_code=400, detail=detail)
+
+        msgs = send_data.get("messages") or []
+        wamid = msgs[0].get("id") if msgs else None
+
+        # Step 3: Log in whatsapp_messages table
+        sb = get_supabase()
+        try:
+            sb.table("whatsapp_messages").insert({
+                "wa_message_id": wamid,
+                "from_number": WHATSAPP_PHONE_NUMBER_ID,
+                "to_number": to,
+                "direction": "out",
+                "msg_type": "image",
+                "media_id": media_id,
+                "body": caption.strip() or "(image)",
+                "handled": True,
+                "raw": send_data,
+            }).execute()
+            sb.table("whatsapp_messages").update({"handled": True}).eq("from_number", to).eq("direction", "in").execute()
+        except Exception as e:
+            print(f"WA outbound media store failed: {e}")
+
+        return {"status": "sent", "media_id": media_id, "message_id": wamid}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image send error: {e}")
+
