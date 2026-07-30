@@ -211,7 +211,7 @@ def check_student_daily_cap(student_id: str) -> None:
 # Budget Alert (email the owner as spend approaches the cap)
 # ----------------------------------------------------------------------
 # Where to send the "budget getting high" heads-up. Override in Railway if needed.
-ADMIN_ALERT_EMAIL = os.getenv("ADMIN_ALERT_EMAIL", "puneet@quarked.tech")
+ADMIN_ALERT_EMAIL = os.getenv("ADMIN_ALERT_EMAIL", "puneet3016@gmail.com")
 # Send once per month at each of these % thresholds (before the 100% hard pause).
 ALERT_THRESHOLDS = [80, 95]
 

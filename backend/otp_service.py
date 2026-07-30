@@ -177,7 +177,7 @@ def send_lead_email_notification(lead_type: str, details: dict) -> None:
     """Send instant email alert for new web registration or WhatsApp lead via Resend."""
     api_key = os.getenv("RESEND_API_KEY")
     sender_email = os.getenv("OTP_FROM_EMAIL")
-    recipient = os.getenv("ADMIN_ALERT_EMAIL", "puneet@quarked.tech")
+    recipient = os.getenv("ADMIN_ALERT_EMAIL", "puneet3016@gmail.com")
 
     if not api_key or not sender_email:
         print("Warning: Missing RESEND_API_KEY or OTP_FROM_EMAIL, skipping lead email alert.")
