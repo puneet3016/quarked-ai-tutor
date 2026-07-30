@@ -1654,15 +1654,20 @@ async def whatsapp_send_media(
         
         media_id = upload_data["id"]
 
-        # Step 2: Send image message
-        img_payload = {
+        # Step 2: Send media message (image or document)
+        is_pdf = content_type == "application/pdf" or filename.lower().endswith(".pdf")
+        msg_type = "document" if is_pdf else "image"
+
+        media_payload = {
             "messaging_product": "whatsapp",
             "to": to,
-            "type": "image",
-            "image": {"id": media_id}
+            "type": msg_type,
+            msg_type: {"id": media_id}
         }
+        if is_pdf:
+            media_payload["document"]["filename"] = filename
         if caption.strip():
-            img_payload["image"]["caption"] = caption.strip()
+            media_payload[msg_type]["caption"] = caption.strip()
 
         send_res = requests.post(
             f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_NUMBER_ID}/messages",
@@ -1670,13 +1675,13 @@ async def whatsapp_send_media(
                 "Authorization": f"Bearer {WHATSAPP_TOKEN}",
                 "Content-Type": "application/json"
             },
-            json=img_payload,
+            json=media_payload,
             timeout=20,
         )
         send_data = send_res.json()
         if "error" in send_data:
             err = send_data["error"]
-            detail = err.get("message", "Image send failed")
+            detail = err.get("message", f"{msg_type.capitalize()} send failed")
             if str(err.get("code")) == "131047":
                 detail = "24-hour window closed — this contact must message you again."
             raise HTTPException(status_code=400, detail=detail)
@@ -1692,9 +1697,9 @@ async def whatsapp_send_media(
                 "from_number": WHATSAPP_PHONE_NUMBER_ID,
                 "to_number": to,
                 "direction": "out",
-                "msg_type": "image",
+                "msg_type": msg_type,
                 "media_id": media_id,
-                "body": caption.strip() or "(image)",
+                "body": caption.strip() or f"({msg_type})",
                 "handled": True,
                 "raw": send_data,
             }).execute()
