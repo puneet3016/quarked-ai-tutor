@@ -1344,6 +1344,14 @@ def _wa_store_message(msg: dict, contacts: list) -> str | None:
         body = (msg.get("button") or {}).get("text")
     elif mtype == "interactive":
         body = json.dumps(msg.get("interactive"))
+    elif mtype == "system":
+        # WhatsApp service events (e.g. user_changed_number). Store the human-readable
+        # body so the inbox shows "User A changed from X to Y" instead of a bare "(system)".
+        sysobj = msg.get("system") or {}
+        body = sysobj.get("body")
+        new_wa_id = sysobj.get("wa_id")
+        if sysobj.get("type") == "user_changed_number" and new_wa_id:
+            body = (body or "Contact changed number") + f"  [new number: {new_wa_id}]"
 
     try:
         # Send instant lead email alert if this is a new WhatsApp contact
