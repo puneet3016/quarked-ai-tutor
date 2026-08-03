@@ -1454,8 +1454,17 @@ async def whatsapp_receive(request: Request, background_tasks: BackgroundTasks):
 
                 for msg in value.get("messages", []) or []:
                     sender = _wa_store_message(msg, contacts)
-                    if sender and WHATSAPP_AUTO_ACK:
-                        background_tasks.add_task(_wa_send_text, sender, WHATSAPP_ACK_TEXT)
+                    if sender:
+                        msg_type = msg.get("type")
+                        if msg_type == "unsupported":
+                            background_tasks.add_task(
+                                _wa_send_text, sender,
+                                "Hi! 👋 We received your message but WhatsApp couldn't deliver the format to us "
+                                "(this happens with voice notes, polls, view-once media, or forwarded channel posts).\n\n"
+                                "Could you please resend as a *text message* or *regular photo*? We'd love to help! 🙏"
+                            )
+                        elif WHATSAPP_AUTO_ACK:
+                            background_tasks.add_task(_wa_send_text, sender, WHATSAPP_ACK_TEXT)
 
                 for st in value.get("statuses", []) or []:
                     _wa_store_status(st)
