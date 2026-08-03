@@ -1336,10 +1336,10 @@ def _wa_store_message(msg: dict, contacts: list) -> str | None:
     body, media_id = None, None
     if mtype == "text":
         body = (msg.get("text") or {}).get("body")
-    elif mtype in ("image", "document", "video", "audio", "sticker"):
-        node = msg.get(mtype) or {}
-        body = node.get("caption") or f"({mtype})"
+    elif mtype in ("image", "document", "video", "audio", "voice", "sticker"):
+        node = msg.get(mtype) or msg.get("audio") or msg.get("voice") or msg.get("video") or msg.get("image") or msg.get("document") or msg.get("sticker") or {}
         media_id = node.get("id")
+        body = node.get("caption") or f"({mtype})"
     elif mtype == "button":
         body = (msg.get("button") or {}).get("text")
     elif mtype == "reaction":
