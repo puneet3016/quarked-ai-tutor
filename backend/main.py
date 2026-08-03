@@ -1338,20 +1338,44 @@ def _wa_store_message(msg: dict, contacts: list) -> str | None:
         body = (msg.get("text") or {}).get("body")
     elif mtype in ("image", "document", "video", "audio", "sticker"):
         node = msg.get(mtype) or {}
-        body = node.get("caption")
+        body = node.get("caption") or f"({mtype})"
         media_id = node.get("id")
     elif mtype == "button":
         body = (msg.get("button") or {}).get("text")
+    elif mtype == "reaction":
+        body = f"Reacted {(msg.get('reaction') or {}).get('emoji', '')}".strip()
+    elif mtype == "location":
+        loc = msg.get("location") or {}
+        body = f"Shared location: {loc.get('name', '')} {loc.get('address', '')} (Lat: {loc.get('latitude')}, Long: {loc.get('longitude')})".strip()
+    elif mtype == "contacts":
+        con_list = msg.get("contacts") or []
+        names = [c.get("name", {}).get("formatted_name", "Contact") for c in con_list]
+        body = f"Shared contact: {', '.join(names)}"
     elif mtype == "interactive":
-        body = json.dumps(msg.get("interactive"))
+        inter = msg.get("interactive") or {}
+        itype = inter.get("type")
+        if itype == "button_reply":
+            body = (inter.get("button_reply") or {}).get("title") or (inter.get("button_reply") or {}).get("id")
+        elif itype == "list_reply":
+            body = (inter.get("list_reply") or {}).get("title") or (inter.get("list_reply") or {}).get("id")
+        else:
+            body = json.dumps(inter)
     elif mtype == "system":
-        # WhatsApp service events (e.g. user_changed_number). Store the human-readable
-        # body so the inbox shows "User A changed from X to Y" instead of a bare "(system)".
         sysobj = msg.get("system") or {}
         body = sysobj.get("body")
         new_wa_id = sysobj.get("wa_id")
         if sysobj.get("type") == "user_changed_number" and new_wa_id:
             body = (body or "Contact changed number") + f"  [new number: {new_wa_id}]"
+
+    if not body:
+        errors = msg.get("errors") or []
+        if errors:
+            e0 = errors[0]
+            body = f"(Unsupported format: {e0.get('title', '')} - {e0.get('details', e0.get('message', ''))})"
+        elif mtype:
+            body = f"({mtype} message)"
+        else:
+            body = "(message received)"
 
     try:
         # Send instant lead email alert if this is a new WhatsApp contact
